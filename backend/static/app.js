@@ -1754,6 +1754,30 @@ if (buildTagEl) buildTagEl.textContent = BUILD_TAG;
 
 checkHealth();
 
+// 首次使用引导：讲清"不装扩展也能用"，只提示一次。
+// 为什么要在界面里说这件事：扩展要开开发者模式加载，很多人到这一步就放弃了，
+// 而实际上粘贴 JD 就能走完全流程。不说明的话，用户会以为这东西必须装扩展。
+(function initOnboard() {
+  const KEY = 'jobpilot-onboard-jobs-v1';
+  const box = document.getElementById('jobs-onboard');
+  const btn = document.getElementById('btn-onboard-ok');
+  if (!box || !btn) return;
+  try {
+    if (localStorage.getItem(KEY) === '1') return;
+  } catch {
+    // 隐私模式禁用 localStorage 时照常显示，只是记不住"已读"
+  }
+  box.hidden = false;
+  btn.addEventListener('click', () => {
+    box.hidden = true;
+    try {
+      localStorage.setItem(KEY, '1');
+    } catch {
+      /* 存不了就算了 */
+    }
+  });
+})();
+
 // 视图恢复必须独立于数据加载：之前挂在 Promise.all().then() 里，
 // 链条里任何一步抛错就整段不执行，用户点「工作台」看到的还是简历页，
 // 而且控制台没有任何提示，完全查不出来。

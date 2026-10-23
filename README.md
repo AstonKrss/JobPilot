@@ -191,29 +191,59 @@ PDF 转 Word 有四个通病，都用渲染截图逐页比对修掉了：
 
 ## 快速开始
 
+### Windows：双击 `start.bat`
+
+首次运行会自动创建虚拟环境并装依赖（3–5 分钟），之后每次启动都只要几秒。
+
+前置条件只有两样：
+
+| 依赖 | 说明 |
+|---|---|
+| Python 3.11+ | 安装时**务必勾选** "Add Python to PATH"。虚拟环境由 `start.bat` 自己创建 |
+| PostgreSQL 14+ | 只用来存数据。装好后把 `bin` 目录写进 `.env` 的 `POSTGRES_BIN`（见下） |
+
+`start.bat` 会依次做这些事，任何一步失败都会停下来并说明原因，不会一闪而过：
+
+1. 没有 `.env` 就从 `.env.example` 复制一份，并提示填 `LLM_API_KEY`
+2. 没有 `.venv` 就创建虚拟环境并装依赖
+3. 找 `postgres.exe`（依次查 `POSTGRES_BIN` → PATH → conda 环境 → 官方安装目录）
+4. 起数据库，**等到端口真的能连上**才继续
+5. 起后端（日志直接打在这个窗口里）
+6. 轮询 `/health`，等后端真的响应了才打开浏览器 —— 先开浏览器再起服务是最常见的"怎么打不开"来源
+
+停止：`Ctrl+C` 或关窗口。数据库会一起关（走 `pg_ctl -m fast`，不是杀进程，避免下次启动走崩溃恢复）。如果直接点了窗口右上角的 ×，数据库可能残留 —— 用 `stop.bat` 收尾，下次启动也会自动复用它。
+
+> `.env` 里的 `POSTGRES_BIN` 支持填目录或可执行文件，例如：
+> `POSTGRES_BIN=C:/Program Files/PostgreSQL/16/bin`。不填时脚本会自己找。
+
+### 手动启动（macOS / Linux，或想看每一步）
+
 ```bash
-# 1. 依赖
 pip install -r requirements.txt
 
-# 2. 数据库（PostgreSQL 16 + pgvector 非必需，本项目用 BYTEA 存向量）
-createdb ragjob
-psql ragjob -f backend/app/db/schema.sql
+createdb ragjob && psql ragjob -f backend/app/db/schema.sql
+cp .env.example .env      # 填 LLM_API_KEY；.env 已被 .gitignore 排除
 
-# 3. 配置
-cp .env.example .env      # 填入 LLM_API_KEY
-# .env 已被 .gitignore 排除，不会进版本库
+python scripts/fetch_embed_model.py          # 本地 bge-small-zh（90MB，可选）
 
-# 4. 语义模型（本地 bge-small-zh，512 维 ONNX）
-python scripts/fetch_embed_model.py
-
-# 5. 启动
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000   # 在 backend/ 下执行
-
-# 6. 扩展
-# 浏览器 → 扩展管理 → 开发者模式 → 加载 extension/ 目录
+python scripts/launch.py                     # 等同于 start.bat 的第二步起
 ```
 
-界面在 `http://127.0.0.1:8000/`。
+`scripts/launch.py` 是跨平台的，macOS/Linux 上同样能用（数据库路径通过 `POSTGRES_BIN` 指定）。
+
+### 浏览器扩展是可选的
+
+**不装扩展能完成全部功能**：在招聘网站打开岗位详情页，`Ctrl+A` 全选 → `Ctrl+C` 复制 → 粘贴到「岗位」页的输入框，入库、匹配、改写、工作台全都照常。
+
+装上扩展只是省事：
+
+| | 不装扩展 | 装了扩展 |
+|---|---|---|
+| 岗位录入 | 复制粘贴 | 点一下自动抓取 |
+| HR 聊天记录 | 手动复制到对话页 | 自动同步到工作台，能发现新回复 |
+| 安装成本 | 0 | 扩展管理 → 开发者模式 → 加载 `extension/` 目录 |
+
+扩展**只读页面**：不碰输入框、不点发送。回复生成后由你自己按回车 —— 这是刻意的边界，见「人机边界」一节。
 
 ---
 
@@ -257,6 +287,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000   # 在 backend/ 下
 ## 目录结构
 
 ```
+start.bat / stop.bat   一键启动 / 停止（Windows；内部调用 scripts/launch.py）
 backend/
   app/
     api/          接口层（jobs / resumes / match / review / tailor / reply /
@@ -269,8 +300,8 @@ backend/
     llm/          模型调用（重试 / 打点 / 快照缓存）
     db/           schema.sql + 各表 repository
   static/         单页界面
-extension/        浏览器扩展（content 抓岗位 / chat 读聊天 / background 跨域代理）
-scripts/          检查脚本（匹配 / 事实核查 / 扩展 / API / 缓存 / 界面启动）
+extension/        浏览器扩展（可选；content 抓岗位 / chat 读聊天 / background 跨域代理）
+scripts/          启动编排（launch / stop）+ 检查脚本（匹配 / 事实核查 / 扩展 / API / 缓存 / 界面启动）
 eval/             匹配效果评估用例
 docs/             设计决策记录
 ```

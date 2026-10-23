@@ -1,0 +1,3 @@
+# Windows 批处理必须用 CRLF：LF 换行在某些环境下会让 goto/label 解析出错
+*.bat text eol=crlf
+*.cmd text eol=crlf

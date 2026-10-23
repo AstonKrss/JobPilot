@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>求职助手</title>
-<link rel="stylesheet" href="./style.css?v=20261023a">
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./style.css?v=20261023b">
 </head>
 <body>
 
@@ -63,8 +64,19 @@
     <section class="view" id="view-jobs">
       <header class="page-head">
         <h1>岗位</h1>
-        <p>粘贴 JD 全文，后端抽取硬约束字段与必备/加分技能。插件抓来的岗位会自动清洗掉页面噪声。</p>
+        <p>粘贴 JD 全文即可，<b>不需要安装任何扩展</b>。后端会抽取硬约束字段与必备/加分技能，并把站内推荐链接之类的页面噪声清掉。</p>
       </header>
+
+      <div class="panel" id="jobs-onboard" hidden>
+        <div class="panel-head">
+          <h2>两种录入方式，选一种就行</h2>
+        </div>
+        <p class="hint"><b>不装扩展</b>：在招聘网站打开岗位详情页，Ctrl+A 全选 → Ctrl+C 复制 → 粘到下面。全程功能完整，只是每条岗位多两步操作。</p>
+        <p class="hint"><b>装了扩展</b>：岗位页点一下自动抓取；还能把 HR 聊天记录自动同步到工作台，不用手动开面板。扩展只读页面，不会替你发送任何消息。</p>
+        <div class="row" style="margin-top:12px">
+          <button class="small" id="btn-onboard-ok">知道了，不再提示</button>
+        </div>
+      </div>
 
       <div class="panel">
         <textarea id="jd-text" rows="7" placeholder="粘贴岗位描述全文：岗位名称、城市、工作性质、职责与任职要求…"></textarea>
@@ -227,6 +239,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="./app.js?v=20261023a"></script>
+<script src="./app.js?v=20261023b"></script>
 </body>
 </html>
