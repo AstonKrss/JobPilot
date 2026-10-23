@@ -631,6 +631,7 @@ button.danger:hover:not(:disabled) { background: var(--danger-weak); }
 }
 
 .missed { color: var(--danger); }
+.ok-text { color: var(--ok); font-weight: 500; }
 
 .jd-actions { margin-top: 10px; }
 

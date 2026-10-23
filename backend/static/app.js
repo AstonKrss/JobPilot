@@ -1105,15 +1105,9 @@ document.getElementById('btn-review').addEventListener('click', async (ev) => {
 
 /* ---------- 工作台：一个岗位的所有动作都在这一页 ---------- */
 
-const WB_STATUS = [
-  ['candidate', '候选'],
-  ['applied', '已投递'],
-  ['talking', '沟通中'],
-  ['interview', '面试'],
-  ['offer', 'Offer'],
-  ['rejected', '不合适'],
-];
-const WB_STATUS_LABEL = Object.fromEntries(WB_STATUS);
+// 曾经这里是六个投递状态（候选/已投/沟通中/面试/Offer/不合适）。
+// 实测一次都没被手动点过 —— 招聘平台自带投递记录，手动维护状态是纯负担。
+// 现在只保留"已投 / 未投"，其余信息（有没有回应）由聊天记录自动带出来。
 
 function fillWorkbenchSelects() {
   const jobSel = document.getElementById('wb-job');
@@ -1146,7 +1140,7 @@ async function loadWorkbench(jobId) {
   statusEl.textContent = '加载中…';
   body.innerHTML = '<div class="panel"><div class="empty">加载中…</div></div>';
   try {
-    const [job, matches, appRes, chatlogs] = await Promise.all([
+    const [job, matches, appRes, chatlogs, similar] = await Promise.all([
       api(`/api/jobs/${jobId}`),
       resumeId
         ? api(`/api/resumes/${resumeId}/matches?include_rejected=true&job_id=${jobId}`)
@@ -1154,12 +1148,10 @@ async function loadWorkbench(jobId) {
       api(`/api/applications/by-job/${jobId}`),
       // 聊天记录按岗位关联：扩展同步时按标题匹配到了才有
       api(`/api/chat-logs?job_id=${jobId}`).catch(() => ({ items: [] })),
+      // 同类岗位：标题向量找相似，带上它们各自的投递结果。
+      // 这是全系统唯一能拿出的"同类经验"证据 —— 比一个算出来的分数更能改变决定
+      api(`/api/workbench/similar/${jobId}?limit=3`).catch(() => null),
     ]);
-    let timeline = [];
-    if (appRes.exists) {
-      const detail = await api(`/api/applications/${appRes.id}`);
-      timeline = detail.timeline || [];
-    }
 
     // 下一步建议：规则算的，秒回。传当前状态过去而不是让后端再查一遍，
     // 避免为了一个提示再跑一次匹配
@@ -1182,14 +1174,14 @@ async function loadWorkbench(jobId) {
     } catch { /* 建议算不出来不影响工作台其他部分 */ }
 
     statusEl.textContent = '';
-    renderWorkbench(jobId, job, matches, appRes, timeline, chatlogs, nextStep);
+    renderWorkbench(jobId, job, matches, appRes, chatlogs, nextStep, similar);
   } catch (e) {
     statusEl.textContent = e.message;
     body.innerHTML = '';
   }
 }
 
-function renderWorkbench(jobId, job, matches, appRes, timeline, chatlogs, nextStep) {
+function renderWorkbench(jobId, job, matches, appRes, chatlogs, nextStep, similar) {
   const body = document.getElementById('wb-body');
   const profile = (job && job.profile) || {};
   const basic = profile.basic || {};
@@ -1217,19 +1209,44 @@ function renderWorkbench(jobId, job, matches, appRes, timeline, chatlogs, nextSt
           ? `<div class="item-meta" style="margin-top:6px">未覆盖的必备技能：<span class="missed">${esc(match.missed_skills.join('、'))}</span></div>`
           : ''}`;
 
-  // 投递状态：手动推进，不做自动推断 —— 从聊天记录猜「约了面试」误判的代价是错过跟进
-  const statusRow = WB_STATUS.map(([key, label]) => {
-    const current = appRes.exists && appRes.status === key;
-    return `<button class="small ${current ? 'primary' : ''}" data-wb-status="${key}" ${current ? 'disabled' : ''}>${label}</button>`;
-  }).join('');
-  const statusHtml = `
-    <div class="wb-status-row">${statusRow}</div>
-    ${appRes.exists
-      ? `<div class="item-meta">当前：${appRes.status_label} · 更新于 ${formatWhen(appRes.updated_at)}</div>
-         ${timeline.length ? `<details><summary class="link-btn" style="cursor:pointer">时间线（${timeline.length} 条）</summary>
-           <ul class="reason-list">${timeline.map((t) => `<li>${WB_STATUS_LABEL[t.status] || t.status} · ${formatWhen(t.created_at)}${t.note ? ' — ' + esc(t.note) : ''}</li>`).join('')}</ul>
-         </details>` : ''}`
-      : '<div class="item-meta">还没有跟踪记录。点上面任意状态开始跟踪这个岗位。</div>'}`;
+  // 投递状态只留「未投 / 已投」两个。
+  // 六态（沟通中/面试/offer/不合适）实测一次都没被手动点过 ——
+  // 手动维护状态是纯负担，而招聘平台自带投递记录。
+  // 系统真正需要知道的只有"投了没"，其余信息由聊天记录自动带出来。
+  const applied = appRes.exists && appRes.status !== 'candidate';
+  const appliedLabel = applied
+    ? `已投 · ${formatWhen(appRes.updated_at) || formatWhen(appRes.created_at)}`
+    : '';
+
+  // 缺口：这是"事实"，不是推测。有就列出来，没有就说全cover了
+  const missed = (match && match.missed_skills) || [];
+  const gapHtml = !match
+    ? '<span class="item-meta">还没有匹配结论，无法判断缺口</span>'
+    : missed.length
+      ? `缺 <span class="missed">${esc(missed.join('、'))}</span>`
+      : '<span class="ok-text">必备技能已全部覆盖</span>';
+
+  // 同类岗位：全系统唯一能拿出的"同类经验"证据
+  const simItems = (similar && similar.items) || [];
+  const simHtml = !similar
+    ? '<div class="item-meta">相似岗位暂时算不出来（语义层未就绪）</div>'
+    : similar.reason
+      ? `<div class="item-meta">${esc(similar.reason)}</div>`
+      : !simItems.length
+        ? '<div class="item-meta">库里还没有方向相近的岗位可比</div>'
+        : `<div class="item-meta">找到 ${similar.total} 个方向相近的岗位，你投了 ${similar.applied} 个${
+            similar.replied ? `，其中 <b>${similar.replied} 个有回应</b>` : '，都还没有回应'
+          }</div>
+        <ul class="reason-list">${simItems
+          .map(
+            (s) =>
+              // 列出判断依据而不是只给一个百分比：百分比对用户没有意义，
+              // 而"共同技能 3 项"是他能自己去核对的
+              `<li>${esc(s.title)}（${s.overlap > 0 ? `共同技能 ${s.overlap} 项` : '标题高度一致'}）${
+                s.replied ? ' · <b>有回应</b>' : s.status && s.status !== 'candidate' ? ' · 已投' : ' · 未投'
+              }</li>`,
+          )
+          .join('')}</ul>`;
 
   body.innerHTML = `
     <div class="panel">
@@ -1256,8 +1273,16 @@ function renderWorkbench(jobId, job, matches, appRes, timeline, chatlogs, nextSt
       ${matchHtml}
     </div>
     <div class="panel">
-      <div class="sec-title">投递状态</div>
-      ${statusHtml}
+      <div class="sec-title">投递前判断</div>
+      <div class="item-meta" style="margin-bottom:10px">技能缺口：${gapHtml}</div>
+      ${simHtml}
+      <div class="row" style="margin-top:14px">
+        ${applied
+          ? `<span class="badge ok">${esc(appliedLabel)}</span>
+             <button class="small" data-wb-applied="0">撤销</button>`
+          : `<button class="small primary" data-wb-applied="1">标记为已投</button>
+             <span class="item-meta">点一下就够了，不用维护状态</span>`}
+      </div>
     </div>
     <div class="panel">
       <div class="sec-title">定制简历</div>
@@ -1274,26 +1299,27 @@ function renderWorkbench(jobId, job, matches, appRes, timeline, chatlogs, nextSt
         : '<div class="empty">还没有同步到这个岗位的聊天记录。在招聘网站的沟通页打开「帮我回复」面板，它会自动把最近消息同步过来。</div>'}
     </div>`;
 
-  // 状态推进：已跟踪走 PATCH，首次走 POST（幂等，同岗位重复创建返回已有记录）
-  body.querySelectorAll('[data-wb-status]').forEach((btn) => {
+  // 已投 / 撤销：只有一个动作。
+  // 首次走 POST，已存在走 PATCH（接口幂等，重复点不会造出多条记录）
+  body.querySelectorAll('[data-wb-applied]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const status = btn.dataset.wbStatus;
+      const next = btn.dataset.wbApplied === '1';
       await withLoading(btn, '…', async () => {
         try {
           if (appRes.exists) {
             await api(`/api/applications/${appRes.id}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status }),
+              body: JSON.stringify({ status: next ? 'applied' : 'candidate' }),
             });
           } else {
             await api('/api/applications', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ job_id: jobId, status }),
+              body: JSON.stringify({ job_id: jobId, status: next ? 'applied' : 'candidate' }),
             });
           }
-          toast(`已更新为「${WB_STATUS_LABEL[status]}」`);
+          toast(next ? '已标记为已投' : '已撤销');
           loadWorkbench(jobId);
           loadWorkbenchStats();
         } catch (e) { toast(e.message, true); }
@@ -1334,27 +1360,27 @@ async function loadWorkbenchStats() {
   if (!box) return;
   try {
     const s = await api('/api/applications/stats');
-    // 没有任何跟踪记录时不占屏
+    // 没有任何投递记录时不占屏
     if (!s.tracked) { box.innerHTML = ''; return; }
 
-    const cards = WB_STATUS.map(([key, label]) => `
-      <div class="summary-item ${key === 'offer' ? 'pass' : key === 'rejected' ? 'reject' : ''}">
-        <div class="n">${s.status_counts[key] || 0}</div><div class="t">${label}</div>
-      </div>`).join('');
-    const rate = s.reply_rate != null ? `${(s.reply_rate * 100).toFixed(0)}%` : '—';
-
+    // 只给绝对数，不给"回复率"百分比。
+    // 原因很实际：一轮求职通常只投十几家，样本不够时百分比会剧烈波动，
+    // 而"投了 3 家、1 家有回应"是事实，"33% 回复率"是把噪音包装成结论。
+    const notApplied = Math.max(s.tracked - s.applied, 0);
     box.innerHTML = `
       <div class="panel">
-        <div class="sec-title">整体进展（跟踪 ${s.tracked} 个岗位）</div>
-        <div class="summary-bar">${cards}
-          <div class="summary-item pass"><div class="n">${rate}</div><div class="t">回复率</div></div>
+        <div class="sec-title">投递进展</div>
+        <div class="summary-bar">
+          <div class="summary-item"><div class="n">${s.applied}</div><div class="t">已投</div></div>
+          <div class="summary-item pass"><div class="n">${s.replied}</div><div class="t">有回应</div></div>
+          <div class="summary-item"><div class="n">${notApplied}</div><div class="t">未投</div></div>
         </div>
         ${s.by_source.length ? `
           <table style="width:100%;font-size:12px;border-collapse:collapse">
             <tr style="color:#6b7078;text-align:left">
               <th style="font-weight:500;padding:4px 8px">平台</th>
-              <th style="font-weight:500;padding:4px 8px">跟踪</th>
-              <th style="font-weight:500;padding:4px 8px">有回复</th>
+              <th style="font-weight:500;padding:4px 8px">已投</th>
+              <th style="font-weight:500;padding:4px 8px">有回应</th>
             </tr>
             ${s.by_source.map((r) => `
               <tr style="border-top:1px solid #eef0f3">
@@ -1363,8 +1389,8 @@ async function loadWorkbenchStats() {
                 <td style="padding:4px 8px">${r.replied}</td>
               </tr>`).join('')}
           </table>
-          <p class="hint">回复率基于扩展同步的聊天记录，只反映「有 HR 消息」的岗位，可能略高于真实回复率。</p>`
-        : '<p class="hint">同步聊天记录后（在招聘网站沟通页打开「帮我回复」），这里会显示各平台的回复率。</p>'}
+          <p class="hint">「有回应」指该岗位的聊天记录里出现过 HR 的消息，由浏览器扩展同步。</p>`
+        : '<p class="hint">同步聊天记录后（在招聘网站沟通页打开「帮我回复」），这里会显示各平台有回应的岗位数。</p>'}
       </div>`;
   } catch {
     box.innerHTML = '';
@@ -1748,7 +1774,7 @@ async function checkHealth() {
 // 构建标记：页脚显示，用来一眼确认浏览器加载的是不是最新版。
 // 踩过这个坑：改完样式，用户看到的是旧标签页，界面"完全没变化"，
 // 分不清是没生效还是没刷新——有这个标记就不用猜。
-const BUILD_TAG = '2026-10-23a · iOS 主题';
+const BUILD_TAG = '2026-10-23b · 工作台改版';
 const buildTagEl = document.getElementById('build-tag');
 if (buildTagEl) buildTagEl.textContent = BUILD_TAG;
 

@@ -31,7 +31,7 @@ const ok = (m) => { console.log(`[PASS] ${m}`); pass += 1; };
 const bad = (m, d) => { console.log(`[FAIL] ${m}${d ? ' — ' + d : ''}`); fail += 1; };
 
 /** 用给定的 HTML 引导页面，返回 { errors, window } */
-function boot(html, hash = '#resumes') {
+function boot(html, hash = '#resumes', apiData = null) {
   const dom = new JSDOM(html, {
     url: `http://127.0.0.1:8000/${hash}`,
     runScripts: 'outside-only',
@@ -47,11 +47,12 @@ function boot(html, hash = '#resumes') {
   w.HTMLElement.prototype.scrollTo = () => {};
   w.scrollTo = () => {};
 
-  // 后端一律返回空数据：这里只验证引导流程不崩，不验证业务
-  w.fetch = async () => ({
+  // 默认所有接口返回空数据（只验证引导流程不崩）；
+  // 传了 apiData 就按 URL 取 mock，用来验证具体视图的渲染
+  w.fetch = async (url) => ({
     ok: true,
     status: 200,
-    text: async () => '{"count":0,"items":[]}',
+    text: async () => JSON.stringify(apiData ? apiData(String(url)) : { count: 0, items: [] }),
   });
 
   w.addEventListener('error', (e) => errors.push(e.error ? e.error.message : e.message));
@@ -108,6 +109,67 @@ const fullHtml = fs
   await sleep(300);
   if (!legacy.errors.length) ok('旧 HTML + 新 app.js 不崩（缓存降级安全）');
   else bad('旧 HTML + 新 app.js 不崩', legacy.errors.slice(0, 3).join(' | '));
+
+  // ---------- 4. 工作台渲染：投递前判断 ----------
+  // 这块的历史：六态面板一次都没人点过，改成"技能缺口 + 同类岗位"后
+  // 最怕的是渲染悄悄退化（面板空了但页面不报错）。所以断言具体内容。
+  const mock = (url) => {
+    if (url.includes('/api/jobs/14')) {
+      return { profile: { title: 'Java后端开发实习生', company: '测试公司', city: '深圳', basic: {} }, url: 'https://example.com/14' };
+    }
+    if (url.includes('/matches')) {
+      return {
+        cached: false,
+        items: [{ decision: 'pass', score: 70, reasons: ['硬约束全部满足'], missed_skills: ['Kafka', 'Redis'], confidence: 0.83 }],
+      };
+    }
+    if (url.includes('/applications/by-job/')) return { exists: false, job_id: 14 };
+    if (url.includes('/chat-logs')) return { items: [] };
+    if (url.includes('/workbench/similar/')) {
+      return {
+        total: 2,
+        applied: 1,
+        replied: 0,
+        items: [
+          { job_id: 5, title: '后端开发实习生', sim: 0.95, overlap: 2, status: 'applied', replied: false },
+          { job_id: 6, title: 'Java', sim: 0.9, overlap: 0, status: null, replied: false },
+        ],
+      };
+    }
+    if (url.includes('/next-step')) return { action: '补 Kafka 再投', reason: '还差 2 项必备技能', urgency: 'normal' };
+    return { count: 0, items: [] };
+  };
+
+  const wbRender = boot(fullHtml, '#workbench', mock);
+  await sleep(200);
+  // 注入一份简历再加载，否则匹配分支拿不到 resume_id
+  const sel = wbRender.w.document.getElementById('wb-resume');
+  const opt = wbRender.w.document.createElement('option');
+  opt.value = '4';
+  sel.appendChild(opt);
+  sel.value = '4';
+  try {
+    await wbRender.w.eval('loadWorkbench(14)');
+  } catch (e) {
+    wbRender.errors.push('loadWorkbench 抛错: ' + e.message);
+  }
+  await sleep(200);
+
+  const text = wbRender.w.document.getElementById('wb-body').textContent || '';
+  const checks = [
+    ['渲染出「投递前判断」面板', text.includes('投递前判断')],
+    ['显示技能缺口（Kafka）', text.includes('Kafka')],
+    ['显示同类岗位的共同技能依据', text.includes('共同技能 2 项')],
+    ['同类岗位标注了已投', text.includes('已投')],
+    ['有「标记为已投」按钮', !!wbRender.w.document.querySelector('[data-wb-applied="1"]')],
+    ['旧的六态「投递状态」面板已移除', !text.includes('投递状态') && !wbRender.w.document.querySelector('[data-wb-status]')],
+  ];
+  for (const [name, passed] of checks) {
+    if (passed) ok(name);
+    else bad(name, '页面内容不符合预期');
+  }
+  if (!wbRender.errors.length) ok('工作台渲染无报错');
+  else bad('工作台渲染无报错', wbRender.errors.slice(0, 3).join(' | '));
 
   console.log(`\n${pass}/${pass + fail} 通过`);
   process.exit(fail ? 1 : 0);
