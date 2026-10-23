@@ -57,15 +57,25 @@
       source: 'liepin',
       // 猎聘详情：/job/123456.shtml，也有 /a/123456.shtml 的老格式
       detailPath: /\/(?:job|a)\/\d+\.s?html?/i,
+      // 外层容器优先。实测同一个岗位：
+      //   .job-intro-container        401 字（含「职位介绍」+「其他信息」里的
+      //                               语言要求、行业要求 —— 这两项对判断匹配有用）
+      //   [data-selector=...]         362 字（只有职位介绍正文，少了上面那段）
+      // 所以 data-selector 不做首选，只作为类名改版后的兜底：
+      // 它是猎聘给自家埋点用的标记，比构建出来的类名更抗改版。
       jd: [
         '.job-intro-container',
+        '[data-selector="job-intro-content"]',
         '.job-description',
         '.job-detail-box',
         '[class*="job-intro"]',
         '[class*="job-description"]',
         '[class*="job-detail"]',
       ],
-      title: ['.name-box .name', '.job-title-box h1', 'h1', '[class*="job-title"]'],
+      // 详情页标题是 <div class="job-title-box"><div title="岗位名">岗位名</div></div>，
+      // 不是 h1。用 [title] 属性取最准 —— 直接拿 [class*="job-title"] 会把
+      // 同级的城市（【深圳-福田区】）和薪资一起读进来
+      title: ['.job-title-box [title]', '.name-box .name', '.job-title-box h1', 'h1', '[class*="job-title"]'],
       // 以下类名于 2026-10-22 由用户在现场点「诊断页面结构」取证得到：
       // 列表页上 .jobCardPcContainer / .jobTitleBox / .jobCompanyInfoBox /
       // .jobCardRightBox 各出现 42 次（一页 42 个岗位）。
@@ -692,6 +702,15 @@
     const cards = collectCards();
     lines.push(`卡片选择器: ${cards.selector || '(未命中)'}  节点数=${cards.nodes.length}`);
 
+    // 详情页还要报一下抓到的标题。标题会被拼在 JD 最前面一起送去抽取，
+    // 抓错了（比如把同级的「【深圳-福田区】」「30-45k」带进来）会污染整个岗位画像，
+    // 而这种错误从界面上完全看不出来 —— 只能靠诊断里这一行核对。
+    if (pageKind() === 'detail') {
+      const t = scrapeDetail().title || '';
+      const dirty = /[【】]|\d+\s*-\s*\d+\s*k/i.test(t) ? '  ← 疑似混入了城市/薪资' : '';
+      lines.push(`抓到标题: ${t || '(空)'}${dirty}`);
+    }
+
     const list = scrapeList(batchCount);
     lines.push(`去重后岗位数: ${list.unique}（本次设定 ${batchCount} 条，上限 ${MAX_BATCH_COUNT}）`);
     if (list.items[0]) lines.push(`首个岗位标题: ${list.items[0].title}`);
@@ -700,7 +719,10 @@
     if (jd) {
       // 可见性是关键判据：隐藏的预渲染详情区读得到文本，但用户看不见，
       // 不能当成"右侧详情面板"，否则会误判成「左列表右详情」布局
-      lines.push(`JD 容器: 命中 ${jd.selector} · ${jd.text.length} 字 · 可见=${isVisible(jd.node)}`);
+      // 太短要提示：猎聘等站点长 JD 会折叠成「展开」按钮，没展开时只渲染前半段 ——
+      // 这时抓到的要求不全，匹配结论会偏向"技能都符合"，方向正好反过来
+      const shortHint = jd.text.length < 300 ? '  ← 偏短，检查页面上是否有「展开」按钮' : '';
+      lines.push(`JD 容器: 命中 ${jd.selector} · ${jd.text.length} 字 · 可见=${isVisible(jd.node)}${shortHint}`);
     } else {
       lines.push(`JD 容器: 未命中（所有候选都不足 ${MIN_JD_CHARS} 字）`);
     }

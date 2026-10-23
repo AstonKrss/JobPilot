@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "求职助手",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "抓取 BOSS/猎聘/智联岗位 JD，按简历算匹配、改简历、生成 HR 回复草稿",
   "permissions": [
     "storage",

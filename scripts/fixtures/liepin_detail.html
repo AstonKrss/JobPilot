@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<!--
+  猎聘岗位详情页快照。
+
+  来源：2026-10-23 用户在 https://www.liepin.com/a/81058331.shtml 点「诊断页面结构」
+  时输出的 outerHTML。**不是完整页面**（诊断只输出前 1200 字），
+  而是按真实结构重建的最小页面：详情头 + JD 容器 + 3 个底部推荐卡片
+  （真实页面有 20 个，这里留 3 个代表，用于验证"推荐卡片不会污染 JD"）。
+
+  这份快照要守住的三个事实：
+    1. 详情页必须被判成 detail，不能被底部的 20 个卡片迷惑成列表页
+    2. JD 容器命中 [data-selector="job-intro-content"] / .job-intro-container
+    3. 标题取 .job-title-box [title]，不能把同级的城市和薪资读进来
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>资深Java开发工程师（LXC）招聘 - 猎聘</title></head>
+<body>
+<div class="job-detail-header-box">
+  <div class="job-title-box">
+    <div title="资深Java开发工程师（LXC）" class="ellipsis-1">资深Java开发工程师（LXC）</div>
+    <div class="job-dq-box">
+      <span class="dq-bracket">【</span><span class="ellipsis-1">深圳-福田区</span><span class="dq-bracket">】</span>
+    </div>
+  </div>
+  <span class="job-salary">30-45k</span>
+</div>
+
+<section class="job-intro-container">
+  <dl class="paragraph">
+    <dt>职位介绍</dt>
+    <dd data-selector="job-intro-content">一、教育背景标签(强要求) 1.本科:国内C9，海外QS前100，US50 2.硕士:本科C9/海外QS前100，US50，硕士:C9/海外QS前100，US50 3.非纯文科专业 二、校园与社会活动标签(以下其一即可满足) 1.学生会/社团核心角色:主席、部长、负责人等 2.创业/项目经历:参与创新创业大赛(“互联网+”、挑战杯等)、有实际创业或项目运营经验 3.社会影响力活动:青年峰会、公益组织、自媒体运营(如小红书、B站等有粉丝/播放量数据) 4.国际交流/活动组织:参与国际会议、外联活动、跨文化团队经历 三、实习与工作标签 1.名企实习经历:互联网(字节、阿里、腾讯、美团)、金融(中金、中信、花旗、摩根士丹利)、咨询(美世、BCG类)、科技(华为、蔚来、博世)等 2.多段实习:通常≥2段，跨行业或跨职能更优</dd>
+  </dl>
+  <dl class="paragraph">
+    <dt>其他信息</dt>
+    <dd class="ellipsis-1">语言要求：不限</dd>
+    <dd class="ellipsis-1">行业要求：专业技术服务,货运/物流/仓储</dd>
+  </dl>
+</section>
+
+<div class="job-list-item">
+  <div data-info="%7B%22job_id%22%3A80879329%7D" class="job-card-pc-container seo-job-card-action-box">
+    <div class="job-card-left-box">
+      <div class="job-detail-box">
+        <a data-nick="job-detail-job-info" target="_blank" href="https://www.liepin.com/a/80879329.shtml" data-jobid="80879329">
+          <div class="job-detail-header-box">
+            <div class="job-title-box">
+              <div title="资深Java开发工程师（LXC）" class="ellipsis-1">资深Java开发工程师（LXC）</div>
+              <div class="job-dq-box"><span class="dq-bracket">【</span><span class="ellipsis-1">深圳-福田区</span><span class="dq-bracket">】</span></div>
+            </div>
+            <span class="job-salary">30-45k</span>
+          </div>
+        </a>
+      </div>
+      <div class="job-detail-company-box">某知名公司</div>
+    </div>
+    <div class="job-card-right-box"><div class="chat-btn-box">立即沟通</div></div>
+  </div>
+</div>
+
+<div class="job-list-item">
+  <div class="job-card-pc-container seo-job-card-action-box">
+    <div class="job-card-left-box">
+      <div class="job-detail-box">
+        <a target="_blank" href="https://www.liepin.com/a/80879330.shtml" data-jobid="80879330">
+          <div class="job-detail-header-box">
+            <div class="job-title-box">
+              <div title="Java后端研发工程师" class="ellipsis-1">Java后端研发工程师</div>
+              <div class="job-dq-box"><span class="dq-bracket">【</span><span class="ellipsis-1">深圳</span><span class="dq-bracket">】</span></div>
+            </div>
+            <span class="job-salary">25-40k·14薪</span>
+          </div>
+        </a>
+      </div>
+      <div class="job-detail-company-box">某通信设备上市公司</div>
+    </div>
+    <div class="job-card-right-box"><div class="chat-btn-box">立即沟通</div></div>
+  </div>
+</div>
+
+<div class="job-list-item">
+  <div class="job-card-pc-container seo-job-card-action-box">
+    <div class="job-card-left-box">
+      <div class="job-detail-box">
+        <a target="_blank" href="https://www.liepin.com/a/80879331.shtml" data-jobid="80879331">
+          <div class="job-detail-header-box">
+            <div class="job-title-box">
+              <div title="Java开发专家/TL" class="ellipsis-1">Java开发专家/TL</div>
+              <div class="job-dq-box"><span class="dq-bracket">【</span><span class="ellipsis-1">广州</span><span class="dq-bracket">】</span></div>
+            </div>
+            <span class="job-salary">45-65k·16薪</span>
+          </div>
+        </a>
+      </div>
+      <div class="job-detail-company-box">某大型电子商务公司</div>
+    </div>
+    <div class="job-card-right-box"><div class="chat-btn-box">立即沟通</div></div>
+  </div>
+</div>
+
+</body>
+</html>
