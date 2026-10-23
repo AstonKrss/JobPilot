@@ -1,0 +1,1769 @@
+/**
+ * 求职助手前端。
+ *
+ * 刻意保持无框架：只有四个视图、一次请求对应一次渲染，没有需要跨组件共享的复杂状态。
+ * 引入构建工具与状态库会让「改一行看效果」多出编译等待，对单用户本地工具是负收益。
+ */
+
+const state = {
+  resumes: [],
+  jobs: [],
+  jobSource: '',      // '' = 全部平台；否则按 source 过滤
+  jobSources: {},     // { boss: 12, liepin: 3, ... }
+
+  pollTimer: null,
+  // job_id -> { score, decision, detail_level }。为空表示没选简历、按时间排序
+  jobScores: {},
+};
+
+/* ---------- 基础设施 ---------- */
+
+async function api(path, options = {}) {
+  const resp = await fetch(path, options);
+  const raw = await resp.text();
+  let data = null;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = null;
+    }
+  }
+  if (!resp.ok) {
+    // FastAPI 的 detail 可能是字符串，也可能是校验错误数组
+    let msg = `HTTP ${resp.status}`;
+    if (data && data.detail !== undefined) {
+      msg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+    } else if (raw) {
+      msg = raw.slice(0, 200);
+    }
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function esc(text) {
+  return String(text ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+let toastTimer = null;
+function toast(message, isError = false) {
+  const node = document.getElementById('toast');
+  node.textContent = message;
+  node.className = 'toast show' + (isError ? ' error' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { node.className = 'toast'; }, 3200);
+}
+
+function setStatus(id, text, kind = '') {
+  const node = document.getElementById(id);
+  node.textContent = text || '';
+  node.className = 'status' + (kind ? ' ' + kind : '');
+}
+
+/** 按钮执行期间禁用并改文案，避免长任务被重复点击 */
+async function withLoading(btn, label, fn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = label;
+  try {
+    return await fn();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+/* ---------- 视图切换 ---------- */
+
+// 视图白名单。新增标签页时必须同步加进来，否则 activateView 会静默返回，
+// 点 tab 没反应、hash 也恢复不了 —— 加「工作台」时就漏了，查了两轮才定位
+const VIEWS = ['resumes', 'jobs', 'match', 'workbench', 'review', 'chat'];
+
+function activateView(name) {
+  if (!VIEWS.includes(name)) return;
+  document.querySelectorAll('.tab').forEach((t) => {
+    t.classList.toggle('active', t.dataset.view === name);
+  });
+  document.querySelectorAll('.view').forEach((v) => {
+    v.classList.toggle('active', v.id === 'view-' + name);
+  });
+}
+
+document.querySelectorAll('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    activateView(tab.dataset.view);
+    // 用 hash 记住当前位置：刷新后不会跳回第一个标签
+    history.replaceState(null, '', `#${tab.dataset.view}`);
+    if (tab.dataset.view === 'workbench') {
+      fillWorkbenchSelects();
+      loadWorkbenchStats();
+    }
+  });
+});
+
+// 工作台入口：岗位列表和匹配卡片上的「工作台」按钮都走这里
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-workbench]');
+  if (!btn) return;
+  const jobId = Number(btn.dataset.workbench) || 0;
+  if (!jobId) return;
+  fillWorkbenchSelects();
+  document.getElementById('wb-job').value = String(jobId);
+  activateView('workbench');
+  history.replaceState(null, '', '#workbench');
+  loadWorkbench(jobId);
+});
+
+// hash 视图恢复放到数据就绪之后：数据没到就切视图，工作台/建议页会是空壳
+
+/* ---------- 简历 ---------- */
+
+const STATUS_META = {
+  done: ['ok', '已解析'],
+  parsing: ['info', '解析中'],
+  pending: ['', '排队中'],
+  partial: ['warn', '部分完成'],
+  failed: ['bad', '失败'],
+};
+
+function renderResumes() {
+  const box = document.getElementById('resume-list');
+  document.getElementById('resume-count').textContent =
+    state.resumes.length ? `共 ${state.resumes.length} 份` : '';
+
+  if (!state.resumes.length) {
+    box.innerHTML = '<div class="empty">还没有简历，先上传一份 PDF。</div>';
+    return;
+  }
+
+  box.innerHTML = state.resumes.map((r) => {
+    const [cls, label] = STATUS_META[r.parse_status] || ['', r.parse_status];
+    const kind = r.source_kind === 'scanned' ? '扫描件 OCR'
+      : r.source_kind === 'text_layer' ? '文本层' : '类型未知';
+    const pages = r.page_count ? `${r.page_count} 页` : '页数未知';
+    const err = r.parse_error
+      ? `<div class="item-meta" style="color:var(--danger)">${esc(r.parse_error)}</div>` : '';
+    return `
+      <div class="item">
+        <div class="item-row">
+          <div class="item-main">
+            <div class="item-title">
+              ${r.is_default ? '<span class="badge ok">主简历</span>' : ''}
+              <span>${esc(r.file_name)}</span>
+              <span class="badge ${cls}">${label}</span>
+              ${r.has_profile ? '<span class="badge info">可匹配</span>' : ''}
+            </div>
+            <div class="item-meta">${kind} · ${pages} · #${r.id}</div>
+            ${err}
+          </div>
+          <div class="item-actions">
+            <button class="small" data-view-resume="${r.id}">查看</button>
+            ${!r.is_default && r.has_profile ? `<button class="small" data-set-default="${r.id}">设为主简历</button>` : ''}
+            <button class="small" data-reparse="${r.id}">重解析</button>
+            <button class="small danger" data-delete="${r.id}">删除</button>
+          </div>
+        </div>
+        <div class="resume-body" data-body="${r.id}"></div>
+      </div>`;
+  }).join('');
+
+  box.querySelectorAll('[data-view-resume]').forEach((btn) => {
+    btn.addEventListener('click', () => toggleResumeDetail(btn));
+  });
+
+  box.querySelectorAll('[data-set-default]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await withLoading(btn, '设置中', async () => {
+        try {
+          await api(`/api/resumes/${btn.dataset.setDefault}/default`, { method: 'PUT' });
+          toast('已设为主简历：匹配、建议、定制、HR 回复都将默认用它');
+          await loadResumes();
+        } catch (e) { toast(e.message, true); }
+      });
+    });
+  });
+
+  box.querySelectorAll('[data-reparse]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await withLoading(btn, '提交中', async () => {
+        try {
+          await api(`/api/resumes/${btn.dataset.reparse}/reparse`, { method: 'POST' });
+          toast('已提交重新解析');
+          await loadResumes();
+        } catch (e) { toast(e.message, true); }
+      });
+    });
+  });
+
+  box.querySelectorAll('[data-delete]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.delete;
+      if (!confirm(`彻底删除简历 #${id}？数据库记录与磁盘上的原始 PDF 都会被删除，无法恢复。`)) return;
+      await withLoading(btn, '删除中', async () => {
+        try {
+          const res = await api(`/api/resumes/${id}`, { method: 'DELETE' });
+          toast(res.file_removed ? '已删除（含磁盘文件）' : '已删除');
+          await loadResumes();
+        } catch (e) { toast(e.message, true); }
+      });
+    });
+  });
+}
+
+/**
+ * 展开/收起简历详情。内容按需拉取：列表要轮询刷新，
+ * 每次刷新都把所有人的画像一起带上会让轮询变重。
+ */
+async function toggleResumeDetail(btn) {
+  const id = btn.dataset.viewResume;
+  const card = btn.closest('.item');
+  const body = card.querySelector(`[data-body="${id}"]`);
+  if (!body) return;
+
+  if (body.classList.contains('open')) {
+    body.classList.remove('open');
+    btn.textContent = '查看';
+    return;
+  }
+
+  if (!body.dataset.loaded) {
+    btn.disabled = true;
+    btn.textContent = '读取中…';
+    try {
+      const detail = await api(`/api/resumes/${id}`);
+      body.innerHTML = renderResumeDetail(detail);
+      body.dataset.loaded = '1';
+    } catch (e) {
+      toast(e.message, true);
+      btn.textContent = '查看';
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+  }
+  body.classList.add('open');
+  btn.textContent = '收起';
+}
+
+/** 画像 + 系统实际读到的原文。两者并排才能判断字段抽错是版面问题还是模型问题 */
+function renderResumeDetail(detail) {
+  const p = detail.profile;
+  const fileLink = `<a class="jd-link" href="/api/resumes/${detail.id}/file" target="_blank" rel="noreferrer">打开原始 PDF ↗</a>`;
+
+  if (!p) {
+    return `
+      <div class="jd-meta">${fileLink}</div>
+      <div class="empty">还没有解析出画像（状态：${esc(detail.parse_status)}）。${detail.parse_error ? '原因：' + esc(detail.parse_error) : ''}</div>`;
+  }
+
+  const b = p.basic || {};
+  const kv = [
+    ['学历', b.edu_level],
+    ['统招', b.edu_fulltime === true ? '是' : b.edu_fulltime === false ? '否' : '未标注'],
+    ['学校', b.school],
+    ['专业', b.major],
+    ['毕业年份', b.graduation_year],
+    ['工作年限', b.work_years != null ? `${b.work_years} 年` : null],
+    ['当前城市', b.current_city],
+  ].filter(([, v]) => v != null && v !== '');
+
+  const skills = (p.skills || [])
+    .map((s) => (typeof s === 'string' ? s : s.name))
+    .filter(Boolean);
+
+  const exps = (p.experiences || []).map((e) => `
+    <div class="tl-item">
+      <div class="tl-head">${esc([e.company, e.title].filter(Boolean).join(' · ') || '未命名经历')}</div>
+      <div class="tl-meta">${esc([e.city, [e.start, e.end || '至今'].filter(Boolean).join(' → ')].filter(Boolean).join(' · '))}</div>
+      ${(e.highlights || []).length
+        ? `<ul class="tl-list">${e.highlights.map((h) => `<li>${esc(h)}</li>`).join('')}</ul>` : ''}
+    </div>`).join('');
+
+  const projects = (p.projects || []).map((x) => `
+    <div class="tl-item">
+      <div class="tl-head">${esc(x.name || '未命名项目')}${x.role ? ' · ' + esc(x.role) : ''}</div>
+      ${(x.tech || []).length ? `<div class="tl-meta">${esc(x.tech.join(' / '))}</div>` : ''}
+      ${(x.highlights || []).length
+        ? `<ul class="tl-list">${x.highlights.map((h) => `<li>${esc(h)}</li>`).join('')}</ul>` : ''}
+    </div>`).join('');
+
+  return `
+    <div class="jd-meta">${fileLink}</div>
+    <div class="kv">
+      ${kv.map(([k, v]) => `<div class="kv-item"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('')}
+    </div>
+    ${skills.length ? `<div class="sec-title">技能</div><div class="chips">${skills.map((s) => `<span class="chip">${esc(s)}</span>`).join('')}</div>` : ''}
+    ${exps ? `<div class="sec-title">工作经历</div><div class="timeline">${exps}</div>` : ''}
+    ${projects ? `<div class="sec-title">项目经历</div><div class="timeline">${projects}</div>` : ''}
+    ${detail.extract_meta && detail.extract_meta.quality
+      ? `<div class="sec-title">抽取质量</div>
+         <div class="item-meta">策略 ${esc(detail.extract_meta.strategy || 'segments')} ·
+           质量分 ${detail.extract_meta.quality.score} ·
+           ${detail.extract_meta.quality.ok ? '通过' : '未通过（已自动换策略重试）'}</div>
+         ${(detail.extract_meta.attempts || []).length > 1
+            ? `<ul class="tl-list">${detail.extract_meta.attempts.map((a) => `<li>${
+                esc(a.strategy)}${a.error ? '：' + esc(a.error) : '：质量分 ' + a.score}${a.detail ? '（' + esc(a.detail) + '）' : ''}</li>`).join('')}</ul>`
+            : ''}`
+      : ''}
+    ${detail.text ? `<div class="sec-title">系统读到的原文（按阅读顺序还原）</div><pre class="raw-text">${esc(detail.text)}</pre>` : ''}
+  `;
+}
+
+async function loadResumes() {
+  try {
+    const data = await api('/api/resumes');
+    state.resumes = data.items || [];
+    renderResumes();
+    fillResumeSelects();
+    schedulePoll();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/** 有未完成的解析就 2 秒后重新拉列表，直到全部结束 */
+function schedulePoll() {
+  clearTimeout(state.pollTimer);
+  const busy = state.resumes.some((r) => r.parse_status === 'parsing' || r.parse_status === 'pending');
+  if (busy) {
+    state.pollTimer = setTimeout(loadResumes, 2000);
+  }
+}
+
+function fillResumeSelects() {
+  const usable = state.resumes.filter((r) => r.has_profile);
+  const targets = [
+    ['match-resume', '选择简历'],
+    ['review-resume', '选择简历'],
+    ['job-sort-resume', '不排序'],
+  ];
+  for (const [id, placeholder] of targets) {
+    const sel = document.getElementById(id);
+    if (!sel) continue; // 岗位页的排序控件在旧版页面里可能不存在，跳过即可
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">' + placeholder + '</option>' +
+      usable.map((r) => `<option value="${r.id}">#${r.id} ${esc(r.file_name)}</option>`).join('');
+    if (prev && usable.some((r) => String(r.id) === prev)) sel.value = prev;
+  }
+}
+
+document.getElementById('btn-upload').addEventListener('click', async (ev) => {
+  const input = document.getElementById('resume-file');
+  if (!input.files.length) { toast('先选择一个 PDF 或 DOCX 文件', true); return; }
+
+  await withLoading(ev.currentTarget, '上传中', async () => {
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    setStatus('upload-status', '上传中…', 'busy');
+    try {
+      const res = await api('/api/resumes/upload', { method: 'POST', body: form });
+      setStatus('upload-status',
+        res.reused ? `已存在，复用 #${res.resume_id} 并重新解析` : `已接收 #${res.resume_id}，正在解析…`, 'busy');
+      input.value = '';
+      await loadResumes();
+    } catch (e) {
+      setStatus('upload-status', e.message, 'error');
+    }
+  });
+});
+/** 按岗位定制简历：调用后端改 DOCX，逐条展示改动与被拒原因 */
+async function tailorForJob(btn) {
+  const jobId = btn.dataset.tailor;
+  const card = btn.closest('.match-card');
+  const body = card.querySelector('.tailor-body');
+  const resumeId = document.getElementById('match-resume').value;
+  if (!resumeId) { toast('先选择一份简历', true); return; }
+
+  body.classList.add('open');
+  body.innerHTML = '<div class="tailor-loading">正在按岗位改写，约 20–40 秒…</div>';
+  btn.disabled = true;
+  try {
+    const data = await api(`/api/resumes/${resumeId}/tailor/${jobId}`, { method: 'POST' });
+    renderTailor(body, data);
+    if (data.accepted > 0) {
+      toast(`已生成定制版：${data.accepted} 处改动`);
+    } else {
+      toast(data.note || '模型判断无需改动');
+    }
+  } catch (e) {
+    body.innerHTML = `<div class="tailor-empty" style="color:var(--danger)">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 三种来源的交代方式。用户最在意"是不是我原来那份"，所以必须说清
+const ORIGIN_NOTE = {
+  docx: '在你的原 Word 上只改文字，版式与样式未改动',
+  pdf_converted: '原文件是 PDF，已按原版式转成 Word 后只改文字；极个别细节可能与原 PDF 有微小差异',
+  rebuilt: '原 PDF 无法保版式转换，这份是按内容重建的，版式不是你的原版',
+};
+
+function renderTailor(box, data) {
+  const diffs = (data.diff || []).filter((d) => d.accepted);
+  const rejected = data.rejected || [];
+  const originNote = ORIGIN_NOTE[data.origin] || ORIGIN_NOTE.rebuilt;
+  const originWarn = data.origin === 'rebuilt';
+
+  box.innerHTML = `
+    <div class="tailor-panel">
+      <div class="tailor-head">
+        <span class="tailor-title">定制结果</span>
+        <span class="badge ok">${data.accepted} 处改动</span>
+        ${rejected.length ? `<span class="badge warn">${rejected.length} 处被拒</span>` : ''}
+        <span class="count">¥${(data.cost_cny || 0).toFixed(4)}</span>
+        ${data.download_url
+          ? `<a class="tailor-download" href="${data.download_url}" target="_blank" rel="noreferrer">下载 Word ↓</a>`
+          : ''}
+      </div>
+      <p class="tailor-note"${originWarn ? ' style="color:var(--danger)"' : ''}>${esc(originNote)}${data.summary ? ' · ' + esc(data.summary) : ''}</p>
+      ${data.hintTotal && data.accepted < data.hintTotal ? `
+        <p class="tailor-note" style="color:var(--text-2)">
+          诊断共 ${data.hintTotal} 条，本次自动应用 ${data.accepted} 处。其余涉及时间线、项目名、期望城市、经历缺失，
+          需要你先确认真实情况才能改 —— 程序不会替你编一段没发生过的经历，也不会替你决定去哪个城市。
+        </p>` : ''}
+      ${data.accepted === 0 && data.download_url
+        ? `<div class="tailor-empty">这一版没有自动改动：${esc(data.note || '')}。文件已按原文输出，可以在 Word 里自己补。</div>`
+        : ''}
+      ${diffs.map((d) => `
+        <div class="tailor-diff">
+          <div class="diff-row"><span class="diff-tag">原文</span><span class="diff-before">${esc(d.before)}</span></div>
+          <div class="diff-row"><span class="diff-tag after">改后</span><span class="diff-after">${esc(d.after)}</span></div>
+          <div class="diff-why">${esc(d.reason || '')}${d.evidence ? ' · 依据：' + esc(d.evidence) : ''}</div>
+        </div>`).join('')}
+      ${rejected.length ? `
+        <div class="tailor-rejected">
+          <div class="sec-title">未采纳的改动（附原因）</div>
+          ${rejected.map((r) => `<div class="rej-row"><span class="rej-why">${esc(r.why)}</span><span class="rej-text">${esc((r.text || '').slice(0, 60))}</span></div>`).join('')}
+        </div>` : ''}
+    </div>`;
+}
+
+/** 定制简历按钮同样用事件委托（卡片会整体重建） */
+document.getElementById('match-result').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-tailor]');
+  if (!btn) return;
+  tailorForJob(btn);
+});
+
+/* ---------- 岗位 ---------- */
+
+/** 平台名与颜色：Boss 蓝、猎聘橙、智联绿、手动灰 */
+const PLATFORM_META = {
+  boss: { label: 'BOSS直聘', cls: 'boss' },
+  liepin: { label: '猎聘', cls: 'liepin' },
+  zhaopin: { label: '智联招聘', cls: 'zhaopin' },
+  manual: { label: '手动粘贴', cls: 'manual' },
+};
+
+function platformBadge(source) {
+  const meta = PLATFORM_META[source];
+  if (!meta) return '';
+  return `<span class="badge plat ${meta.cls}">${meta.label}</span>`;
+}
+
+function renderPlatformBar() {
+  const bar = document.getElementById('platform-bar');
+  const counts = state.jobSources || {};
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const items = [
+    ['', '全部平台', total],
+    ...Object.entries(PLATFORM_META).map(([key, meta]) => [key, meta.label, counts[key] || 0]),
+  ].filter(([key, , n]) => key !== '' || n > 0);
+
+  bar.innerHTML = items.map(([key, label, n]) => `
+    <button class="plat-chip ${state.jobSource === key ? 'active' : ''}" data-source="${key}">
+      ${label}<span class="n">${n}</span>
+    </button>`).join('');
+
+  bar.querySelectorAll('[data-source]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.jobSource = btn.dataset.source;
+      renderPlatformBar();
+      renderJobs();
+    });
+  });
+}
+
+function renderJobs() {
+  const box = document.getElementById('job-list');
+  const scored = Object.keys(state.jobScores).length > 0;
+  document.getElementById('job-count').textContent =
+    state.jobs.length ? `共 ${state.jobs.length} 个` : '';
+
+  // 有分数时排序：默认按分数降序（最直观），也可切成"通过优先"（与匹配页同口径）。
+  // 分数是本地规则算的，切换简历可以即时重排，不花模型调用
+  const ORDER = { pass: 0, confirm: 1, reject: 2 };
+  const mode = document.getElementById('job-sort-mode').value;
+  const visible = state.jobSource
+    ? state.jobs.filter((j) => (j.source || 'manual') === state.jobSource)
+    : state.jobs;
+
+  const jobs = scored
+    ? [...visible].sort((a, b) => {
+      const sa = state.jobScores[a.id];
+      const sb = state.jobScores[b.id];
+      if (!sa && !sb) return b.id - a.id;
+      if (!sa) return 1;
+      if (!sb) return -1;
+      if (mode === 'decision') {
+        const da = ORDER[sa.decision] ?? 3;
+        const db = ORDER[sb.decision] ?? 3;
+        return da - db || (sb.score ?? 0) - (sa.score ?? 0);
+      }
+      return (sb.score ?? 0) - (sa.score ?? 0);
+    })
+    : visible;
+
+  if (!jobs.length) {
+    box.innerHTML = state.jobSource
+      ? `<div class="empty">${PLATFORM_META[state.jobSource]?.label || state.jobSource} 下还没有岗位</div>`
+      : '<div class="empty">还没有岗位，先粘贴一条 JD，或用插件从招聘网站抓取</div>';
+  } else {
+    box.innerHTML = jobs.map((j) => {
+      const exp = j.exp_min != null
+        ? `${j.exp_min}${j.exp_max != null ? '–' + j.exp_max : '+'} 年`
+        : '年限未标';
+      const must = (j.must_have_skills || []);
+      // 技能用 chip 展示而不是拼成一行：一行几十个字很难扫。
+      // 但抽取出的技能常是整句要求，所以 chip 要截断 + hover 看全文
+      const chips = must.slice(0, 6)
+        .map((s) => `<span class="chip chip-clip" title="${esc(s)}">${esc(s)}</span>`).join('');
+      const more = must.length > 6 ? `<span class="chip">+${must.length - 6}</span>` : '';
+      const sc = state.jobScores[j.id];
+      const decide = sc
+        ? `<span class="badge ${sc.decision === 'pass' ? 'ok' : sc.decision === 'reject' ? 'bad' : 'warn'}">${
+          { pass: '通过', confirm: '待确认', reject: '否决' }[sc.decision] || sc.decision}</span>`
+        : '';
+      const scoreTag = sc && sc.score != null ? `<span class="score">${sc.score} 分</span>` : '';
+      return `
+        <div class="item">
+          <div class="item-row">
+            <div class="item-main">
+              <div class="item-title">
+                <span>${esc(j.title || '（未抽取标题）')}</span>
+                ${decide}
+                ${platformBadge(j.source || 'manual')}
+                ${j.job_nature ? `<span class="badge">${esc(j.job_nature)}</span>` : ''}
+                ${j.edu_level ? `<span class="badge">${esc(j.edu_level)}</span>` : ''}
+                ${j.city ? `<span class="badge">${esc(j.city)}</span>` : ''}
+                ${j.detail_level === 'full' ? '<span class="badge ok">完整 JD</span>'
+                  : j.detail_level === 'digest' ? '<span class="badge warn">仅摘要</span>' : ''}
+                ${scoreTag}
+              </div>
+              <div class="item-meta">${esc(exp)} · #${j.id}${j.url ? ' · <a class="jd-link" href="' + esc(j.url) + '" target="_blank" rel="noreferrer">原站链接 ↗</a>' : ''}</div>
+              ${must.length
+                ? `<div class="chips" style="margin-top:6px">${chips}${more}</div>`
+                : `<div class="item-meta" style="margin-top:6px;color:var(--faint)">未列出必备技能</div>`}
+            </div>
+            <div class="item-actions">
+              <button class="small" data-view-job="${j.id}">查看 JD</button>
+              <button class="small" data-workbench="${j.id}">工作台</button>
+            </div>
+          </div>
+          <div class="jd-body" data-job-body="${j.id}"></div>
+        </div>`;
+    }).join('');
+
+    box.querySelectorAll('[data-view-job]').forEach((btn) => {
+      btn.addEventListener('click', () => toggleJobDetail(btn));
+    });
+  }
+
+  const sel = document.getElementById('review-job');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">不指定（普适体检）</option>' +
+    state.jobs.map((j) => `<option value="${j.id}">#${j.id} ${esc(j.title || '未命名')}</option>`).join('');
+  if (prev) sel.value = prev;
+}
+
+async function toggleJobDetail(btn) {
+  const id = btn.dataset.viewJob;
+  const card = btn.closest('.item');
+  const body = card.querySelector(`[data-job-body="${id}"]`);
+  if (!body) return;
+
+  if (body.classList.contains('open')) {
+    body.classList.remove('open');
+    btn.textContent = '查看 JD';
+    return;
+  }
+
+  if (!body.dataset.loaded) {
+    btn.disabled = true;
+    btn.textContent = '读取中…';
+    try {
+      const d = await api(`/api/jobs/${id}`);
+      const p = d.profile || {};
+      const chips = (list, label) => ((list || []).length
+        ? `<div class="jd-skills"><span class="skill-label">${label}</span>${list
+          .map((s) => `<span class="skill-chip">${esc(s)}</span>`).join('')}</div>`
+        : '');
+      // 卡片顶部已经列过必备技能（最多 6 条），这里只在被截断时补全，
+      // 否则同一组 chip 会在同一张卡上出现两次
+      const mustAll = p.must_have_skills || [];
+      const mustExtra = mustAll.length > 6 ? chips(mustAll.slice(6), '必备（续）') : '';
+      body.innerHTML = `
+        <div class="jd-meta">
+          <span class="badge ${d.detail_level === 'full' ? 'ok' : 'warn'}">
+            ${d.detail_level === 'full' ? '完整 JD' : '仅列表摘要'}
+          </span>
+          ${d.url
+            ? `<a class="jd-link" href="${esc(d.url)}" target="_blank" rel="noreferrer">在原网站打开 ↗</a>`
+            : ''}
+        </div>
+        ${chips(p.nice_to_have_skills, '加分')}
+        ${mustExtra}
+        <pre class="jd-text">${esc(d.raw_text || '（没有保存 JD 原文）')}</pre>`;
+      body.dataset.loaded = '1';
+    } catch (e) {
+      toast(e.message, true);
+      btn.textContent = '查看 JD';
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+  }
+  body.classList.add('open');
+  btn.textContent = '收起';
+}
+
+async function loadJobs() {
+  try {
+    const data = await api('/api/jobs');
+    state.jobs = data.items || [];
+    state.jobSources = data.sources || {};
+    renderPlatformBar();
+    renderJobs();
+    // 正在按匹配度排序时，新入库或重抽过的岗位需要重新算分
+    const selected = document.getElementById('job-sort-resume').value;
+    if (selected) await loadJobScores(selected);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/** 拉一份「岗位 -> 分数」的轻量表并重排。纯本地规则，不花模型调用 */
+async function loadJobScores(resumeId) {
+  if (!resumeId) {
+    state.jobScores = {};
+    renderJobs();
+    return;
+  }
+  try {
+    const data = await api(`/api/resumes/${resumeId}/job-scores`);
+    const map = {};
+    for (const item of data.items || []) map[item.job_id] = item;
+    state.jobScores = map;
+    renderJobs();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById('job-sort-resume').addEventListener('change', (ev) => {
+  loadJobScores(ev.currentTarget.value);
+});
+document.getElementById('job-sort-mode').addEventListener('change', () => {
+  renderJobs();
+});
+
+document.getElementById('btn-ingest').addEventListener('click', async (ev) => {
+  const text = document.getElementById('jd-text').value.trim();
+  if (text.length < 30) { toast('JD 太短，至少 30 个字符', true); return; }
+
+  await withLoading(ev.currentTarget, '解析中…', async () => {
+    setStatus('ingest-status', '抽取字段中，约 10–20 秒…', 'busy');
+    try {
+      const res = await api('/api/jobs/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'manual', raw_text: text }),
+      });
+      setStatus('ingest-status', `已入库 #${res.job_id}（¥${res.cost_cny}）`, 'done');
+      document.getElementById('jd-text').value = '';
+      await loadJobs();
+    } catch (e) {
+      setStatus('ingest-status', e.message, 'error');
+    }
+  });
+});
+
+/* ---------- 匹配 ---------- */
+
+const DECISION_LABEL = { pass: '通过', confirm: '待确认', reject: '否决' };
+
+function renderMatches(data) {
+  const box = document.getElementById('match-result');
+  const counts = data.counts || {};
+
+  if (!data.items || !data.items.length) {
+    box.innerHTML = '<div class="panel"><div class="empty">没有可显示的结果。若开启了「显示被否决」仍为空，可能是岗位库还没有数据。</div></div>';
+    return;
+  }
+
+  const groups = [
+    ['pass', '通过（信息完整，已排序）'],
+    ['confirm', '待确认（信息缺失，不能直接判否）'],
+    ['reject', '否决（硬约束不满足）'],
+  ];
+
+  box.innerHTML = `
+    <div class="summary-bar">
+      <div class="summary-item pass"><div class="n">${counts.pass || 0}</div><div class="t">通过</div></div>
+      <div class="summary-item confirm"><div class="n">${counts.confirm || 0}</div><div class="t">待确认</div></div>
+      <div class="summary-item reject"><div class="n">${counts.reject || 0}</div><div class="t">否决</div></div>
+      <div class="summary-item"><div class="n">${data.total_jobs || 0}</div><div class="t">已比对岗位</div></div>
+    </div>
+    ${data.cached
+      ? `<p class="hint">这组条件的结果来自缓存（${formatWhen(data.cached_at)}算的，${data.elapsed_ms || 0}ms 命中）。
+           简历重解析或岗位库有变化会自动重算。
+           <button class="link-btn" id="btn-match-force">重新匹配</button></p>`
+      : ''}
+    ${groups.map(([key, title]) => {
+        const items = data.items.filter((i) => i.decision === key);
+        if (!items.length) return '';
+        const cards = items.map((i) => `
+              <div class="match-card ${key}">
+                <div class="match-head">
+                  <span class="match-title">${esc(i.title || '未命名岗位')}</span>
+                  <span class="badge ${key === 'pass' ? 'ok' : key === 'reject' ? 'bad' : 'warn'}">${DECISION_LABEL[key]}</span>
+                  ${i.company ? `<span class="item-meta">${esc(i.company)}</span>` : ''}
+                  ${i.detail_level === 'digest'
+                    ? '<span class="badge warn">仅摘要·技能匹配不可信</span>' : ''}
+                  ${i.confidence != null
+                    ? `<span class="badge" title="岗位字段缺失：${esc((i.info_missing || []).join('、') || '无')}">信息 ${Math.round(i.confidence * 100)}%</span>`
+                    : ''}
+                  ${i.score != null
+                    ? `<span class="score" title="参考分：依据岗位有限的几项字段算出，不代表录用概率">${i.score} 分</span>`
+                    : `<span class="item-meta">${esc(i.score_note || '信息不足，未评分')}</span>`}
+                </div>
+                <ul class="reason-list">
+                  ${(i.reasons || [])
+                    // 缺口在下面单独用红字列出，这里跳过避免同一句话说两遍
+                    .filter((r) => !r.startsWith('未覆盖的必备技能'))
+                    .map((r) => `<li>${esc(r)}</li>`).join('')}
+                </ul>
+                ${(i.missed_skills || []).length
+                  ? `<div class="item-meta" style="margin-top:6px">未覆盖的必备技能：<span class="missed">${esc(i.missed_skills.join('、'))}</span></div>`
+                  : ''}
+                <div class="jd-actions">
+                  <button class="link-btn" data-jd="${i.job_id}" data-level="${esc(i.detail_level || 'unknown')}">
+                    查看完整 JD${i.detail_level === 'digest' ? '（仅摘要）' : ''}
+                  </button>
+                  <span class="act-sep">·</span>
+                  <button class="link-btn" data-tailor="${i.job_id}">按此岗位定制简历</button>
+                  <span class="act-sep">·</span>
+                  <button class="link-btn" data-workbench="${i.job_id}">工作台</button>
+                </div>
+                <div class="jd-body"></div>
+                <div class="tailor-body"></div>
+              </div>`).join('');
+
+        // 否决项默认折叠：真实数据里否决常有十几二十条，全部展开会把
+        // 「通过」挤到两屏之外，用户得先滚过一堆不相关的东西才能看到结果
+        if (key === 'reject') {
+          return `
+          <div class="result-group">
+            <details class="group-details">
+              <summary class="group-title">${title} · ${items.length} 个（点击展开，含每条被卡的硬约束）</summary>
+              ${cards}
+            </details>
+          </div>`;
+        }
+        return `
+          <div class="result-group">
+            <p class="group-title">${title}</p>
+            ${cards}
+          </div>`;
+      }).join('')}`;
+
+  // 缓存提示里的「重新匹配」是局部重算，不走顶部按钮，避免整页 loading
+  const forceBtn = box.querySelector('#btn-match-force');
+  if (forceBtn) forceBtn.addEventListener('click', () => runMatch(true));
+}
+
+/**
+ * JD 展开用事件委托，不逐条绑监听：
+ * 每次重新匹配都会整体重建 innerHTML，逐条绑的话监听会随旧节点一起丢掉。
+ * 内容按需拉取 —— 一次匹配可能有几十个岗位，全量塞进首屏响应没意义。
+ */
+document.getElementById('match-result').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-jd]');
+  if (!btn) return;
+  const card = btn.closest('.match-card');
+  const body = card.querySelector('.jd-body');
+  if (!body) return;
+
+  if (body.classList.contains('open')) {
+    body.classList.remove('open');
+    btn.textContent = btn.dataset.label || '查看完整 JD';
+    return;
+  
+}
+
+  if (!body.dataset.loaded) {
+    const original = btn.textContent;
+    btn.dataset.label = original;
+    btn.disabled = true;
+    btn.textContent = '读取中…';
+    try {
+      const detail = await api(`/api/jobs/${btn.dataset.jd}`);
+      const level = detail.detail_level || btn.dataset.level || 'unknown';
+      const levelText = { full: '完整 JD', digest: '仅列表摘要', unknown: '未知' }[level] || '未知';
+      const p = detail.profile || {};
+      const chips = (list) => (list || []).map((s) => `<span class="skill-chip">${esc(s)}</span>`).join('');
+      body.innerHTML = `
+        <div class="jd-meta">
+          <span class="badge ${level === 'full' ? 'ok' : 'warn'}">${esc(levelText)}</span>
+          ${detail.url
+            ? `<a class="jd-link" href="${esc(detail.url)}" target="_blank" rel="noreferrer">在原网站打开 ↗</a>`
+            : '<span class="item-meta">手动粘贴的岗位，没有原始链接</span>'}
+        </div>
+        ${(p.must_have_skills || []).length
+          ? `<div class="jd-skills"><span class="skill-label">必备</span>${chips(p.must_have_skills)}</div>`
+          : ''}
+        ${(p.nice_to_have_skills || []).length
+          ? `<div class="jd-skills"><span class="skill-label">加分</span>${chips(p.nice_to_have_skills)}</div>`
+          : ''}
+        <pre class="jd-text">${esc(detail.raw_text || '（没有保存 JD 原文）')}</pre>
+      `;
+      body.dataset.loaded = '1';
+      btn.textContent = '收起 JD';
+    } catch (e) {
+      toast(e.message, true);
+      btn.textContent = original;
+    } finally {
+      btn.disabled = false;
+    }
+  } else {
+    btn.textContent = '收起 JD';
+  }
+  body.classList.add('open');
+});
+
+/** 放宽探索：把"全部被否"变成"差在哪、放宽哪一条能通" */
+document.getElementById('btn-relax').addEventListener('click', async (ev) => {
+  const resumeId = document.getElementById('match-resume').value;
+  if (!resumeId) { toast('先选择一份已解析的简历', true); return; }
+
+  await withLoading(ev.currentTarget, '计算中…', async () => {
+    setStatus('match-status', '正在算放宽后的结果…', 'busy');
+    try {
+      const params = new URLSearchParams({
+        accept_relocation: document.getElementById('match-relocation').checked,
+        accept_outsourcing: document.getElementById('match-outsourcing').checked,
+        accept_internship: document.getElementById('match-internship').checked,
+        target_cities: document.getElementById('match-cities').value.trim(),
+      });
+      const data = await api(`/api/resumes/${resumeId}/relaxations?${params}`, { method: 'POST' });
+      renderRelaxations(data);
+      setStatus('match-status', '放宽方案已生成', 'done');
+    } catch (e) {
+      setStatus('match-status', e.message, 'error');
+    }
+  });
+});
+
+function renderRelaxations(data) {
+  const box = document.getElementById('relax-result');
+  const base = data.base || {};
+  const advice = String(data.advice || '').split('\n').map((x) => x.trim()).filter(Boolean);
+  const variants = data.variants || [];
+
+  box.innerHTML = `
+    <div class="panel">
+      <div class="panel-head">
+        <h2>放宽约束后</h2>
+        <span class="count">当前：通过 ${base.pass || 0} · 待确认 ${base.confirm || 0} · 否决 ${base.reject || 0}</span>
+      </div>
+      ${advice.length
+        ? `<div class="sg-block"><span class="label">建议</span>${advice.map((a) => `<div>${esc(a)}</div>`).join('')}</div>`
+        : ''}
+      <div class="list">
+        ${variants.map((v) => `
+          <div class="item">
+            <div class="item-row">
+              <div class="item-main">
+                <div class="item-title">
+                  <span>${esc(v.label)}</span>
+                  <span class="badge ${v.pass_count > (base.pass || 0) ? 'ok' : ''}">通过 ${base.pass || 0} → ${v.pass_count}</span>
+                  <span class="badge">新增可投 ${v.opened_total}</span>
+                </div>
+                ${(v.opened || []).length
+                  ? `<ul class="reason-list">${v.opened.map((o) => `
+                      <li>${esc(o.title)}（${esc(o.city || '城市未标')}，${o.score} 分）— 原先卡在：${esc((o.was_blocked_by || []).join('；') || '未记录')}</li>`).join('')}</ul>`
+                  : '<div class="item-meta">放宽这一项没有变化 —— 它不是瓶颈</div>'}
+              </div>
+            </div>
+          </div>`).join('')}
+      </div>
+      <p class="hint">放宽只是给你一张"如果……会怎样"的地图，正式匹配仍按原规则否决。</p>
+    </div>`;
+}
+
+async function runMatch(force) {
+  const resumeId = document.getElementById('match-resume').value;
+  if (!resumeId) { toast('先选择一份已解析的简历', true); return; }
+  const btn = document.getElementById('btn-match');
+
+  await withLoading(btn, '匹配中…', async () => {
+    setStatus('match-status', force ? '按当前条件重新计算…' : '过滤与排序中…', 'busy');
+    try {
+      const params = new URLSearchParams({
+        include_rejected: document.getElementById('match-rejected').checked,
+        accept_relocation: document.getElementById('match-relocation').checked,
+        accept_outsourcing: document.getElementById('match-outsourcing').checked,
+        accept_internship: document.getElementById('match-internship').checked,
+        target_cities: document.getElementById('match-cities').value.trim(),
+      });
+      if (force) params.set('force', 'true');
+      const data = await api(`/api/resumes/${resumeId}/matches?${params}`);
+      const how = data.cached
+        ? `命中缓存 · ${formatWhen(data.cached_at)}算的`
+        : `实算 ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s`;
+      setStatus('match-status', `已比对 ${data.total_jobs} 个岗位 · ${how}`, 'done');
+      renderMatches(data);
+    } catch (e) {
+      setStatus('match-status', e.message, 'error');
+    }
+  });
+}
+
+document.getElementById('btn-match').addEventListener('click', () => runMatch(false));
+
+/* ---------- 建议 ---------- */
+
+const CATEGORY_LABEL = {
+  resume_defect: '简历硬伤',
+  jd_gap: '岗位要求缺证据',
+  nice_gap: '加分项未体现',
+};
+const SEVERITY_LABEL = { high: '高', medium: '中', low: '低' };
+
+/** 相对时间，用于标注"这份结果是什么时候算的" */
+function formatWhen(iso) {
+  if (!iso) return '上次';
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '上次';
+  const diff = (Date.now() - t) / 1000;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  return new Date(t).toLocaleDateString('zh-CN');
+}
+
+function renderReview(data, resumeId, jobId, fromCache) {
+  const box = document.getElementById('review-result');
+  if (!data.items || !data.items.length) {
+    box.innerHTML = '<div class="panel"><div class="empty">没有产出建议。</div></div>';
+    return;
+  }
+
+  // 只有定向模式才有岗位可改，也才有必要生成文件
+  const canTailor = data.mode === 'targeted' && jobId && resumeId;
+  // 刚算出来的显示轮次与耗时；从库里读回来的只能显示生成时间
+  const meta = data.elapsed_s != null
+    ? `${data.rounds} 轮 · 耗时 ${data.elapsed_s}s`
+    : `${formatWhen(data.created_at)}生成`;
+
+  box.innerHTML = `
+    <div class="result-head">
+      <div class="result-title">
+        ${data.total} 条建议
+        <span class="count">${meta}${data.flagged ? ` · ${data.flagged} 条未通过事实校验` : ''}</span>
+      </div>
+      <p class="hint">${data.mode === 'targeted'
+        ? '定向改写：针对所选岗位。'
+        : '普适体检：不针对具体岗位。'}标黄的条目其改写示例未通过事实校验，已如实保留原样。</p>
+      ${fromCache ? '<p class="hint">这是上次生成的结果，没有重新调用模型。要更新点「重新生成」。</p>' : ''}
+      ${canTailor ? `
+        <div class="row wrap" style="margin-top:10px">
+          <button class="primary" id="btn-review-tailor">按建议生成 Word 简历</button>
+          <span class="hint" style="margin:0 0 0 10px">只自动应用「有原文依据」的措辞改动；时间线矛盾、项目名不一致这类必须你自己确认事实，程序不会替你改。</span>
+        </div>` : ''}
+    </div>
+    ${data.items.map((s) => `
+        <div class="suggestion ${s.fact_status === 'passed' ? 'passed' : 'flagged'}">
+          <div class="sg-head">
+            <span class="badge info">${CATEGORY_LABEL[s.category] || s.category}</span>
+            <span class="badge ${s.severity === 'high' ? 'bad' : s.severity === 'medium' ? 'warn' : ''}">${SEVERITY_LABEL[s.severity] || s.severity}</span>
+            <span class="item-meta">${esc(s.anchor || '')}</span>
+            ${s.fact_status !== 'passed' ? '<span class="badge warn">未通过事实校验</span>' : ''}
+          </div>
+          <p class="sg-problem">${esc(s.problem)}</p>
+          ${s.direction ? `<div class="sg-block"><span class="label">改写方向</span>${esc(s.direction)}</div>` : ''}
+          ${s.example ? `<div class="sg-block"><span class="label">改写示例</span>${esc(s.example)}</div>` : ''}
+          ${s.jd_requirement ? `<div class="sg-block"><span class="label">对应岗位要求</span>${esc(s.jd_requirement)}</div>` : ''}
+          ${s.fact_issue ? `<div class="sg-block issue"><span class="label">未通过原因</span>${esc(s.fact_issue)}</div>` : ''}
+        </div>`).join('')}
+    <div id="review-tailor-box"></div>`;
+
+  if (canTailor) {
+    const btn = box.querySelector('#btn-review-tailor');
+    const target = box.querySelector('#review-tailor-box');
+    // 把上面这些诊断原样交给改写环节：不然用户看完 7 条问题点生成，
+    // 实际改的却是另一套逻辑，两边对不上
+    const hints = data.items.map((s) => {
+      const where = s.anchor ? `【${s.anchor}】` : '';
+      return `${where}${s.problem}${s.direction ? ' → ' + s.direction : ''}`;
+    });
+    btn.addEventListener('click', () => runReviewTailor(btn, target, resumeId, jobId, hints));
+  }
+}
+
+/** 在建议面板里直接把改动落到文件上，免去"回匹配列表再找那个按钮" */
+async function runReviewTailor(btn, box, resumeId, jobId, hints) {
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = '生成中…';
+  box.innerHTML = '<div class="tailor-loading">正在把改动写进 Word，约 20–40 秒…</div>';
+  try {
+    const data = await api(`/api/resumes/${resumeId}/tailor/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hints: hints || [] }),
+    });
+    renderTailor(box, { ...data, hintTotal: (hints || []).length });
+    if (data.accepted > 0) toast(`已生成定制版：${data.accepted} 处改动`);
+    else toast(data.note || '未做改动，已按原文输出一份 Word');
+  } catch (e) {
+    box.innerHTML = `<div class="tailor-empty" style="color:var(--danger)">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+/**
+ * 打开页面或换简历/岗位时，先看库里有没有上次的结果。
+ * 一次生成 20–40 秒、约 ¥0.03，用户切来切去不该每次都重算。
+ */
+async function loadLatestReview() {
+  const resumeId = document.getElementById('review-resume').value;
+  const jobId = document.getElementById('review-job').value;
+  const box = document.getElementById('review-result');
+  const btn = document.getElementById('btn-review');
+
+  if (!resumeId) {
+    box.innerHTML = '';
+    setStatus('review-status', '', '');
+    btn.textContent = '生成建议';
+    return;
+  }
+
+  try {
+    const qs = jobId ? `?job_id=${jobId}` : '';
+    const data = await api(`/api/resumes/${resumeId}/review/latest${qs}`);
+    if (!data.exists) {
+      box.innerHTML = '';
+      setStatus('review-status', '这份简历还没生成过建议', '');
+      btn.textContent = '生成建议';
+      return;
+    }
+    if (data.stale) {
+      // 简历重新解析过，旧建议指向的段落可能已经不存在了
+      box.innerHTML = '';
+      setStatus('review-status', '简历重新解析过，上次的建议已失效，需要重新生成', '');
+      btn.textContent = '重新生成';
+      return;
+    }
+    setStatus('review-status', `显示${formatWhen(data.created_at)}的结果，共 ${data.total} 条`, 'done');
+    btn.textContent = '重新生成';
+    renderReview(data, resumeId, jobId, true);
+  } catch {
+    // 读历史失败不该挡住主流程，静默即可
+  }
+}
+
+document.getElementById('review-resume').addEventListener('change', loadLatestReview);
+document.getElementById('review-job').addEventListener('change', loadLatestReview);
+
+document.getElementById('btn-review').addEventListener('click', async (ev) => {
+  const resumeId = document.getElementById('review-resume').value;
+  if (!resumeId) { toast('先选择一份已解析的简历', true); return; }
+
+  await withLoading(ev.currentTarget, '生成中…', async () => {
+    setStatus('review-status', '生成建议并逐条核查事实，约 20–40 秒…', 'busy');
+    try {
+      const jobId = document.getElementById('review-job').value;
+      const url = `/api/resumes/${resumeId}/review` + (jobId ? `?job_id=${jobId}` : '');
+      const data = await api(url, { method: 'POST' });
+      setStatus('review-status', `完成：${data.total} 条，耗时 ${data.elapsed_s}s`, 'done');
+      ev.currentTarget.textContent = '重新生成';
+      // 把 resumeId / jobId 传下去：定向模式下要能就地生成 Word，
+      // 否则用户只能回匹配列表再找「按此岗位定制简历」那个按钮
+      renderReview(data, resumeId, jobId, false);
+    } catch (e) {
+      setStatus('review-status', e.message, 'error');
+    }
+  });
+});
+
+/* ---------- 工作台：一个岗位的所有动作都在这一页 ---------- */
+
+const WB_STATUS = [
+  ['candidate', '候选'],
+  ['applied', '已投递'],
+  ['talking', '沟通中'],
+  ['interview', '面试'],
+  ['offer', 'Offer'],
+  ['rejected', '不合适'],
+];
+const WB_STATUS_LABEL = Object.fromEntries(WB_STATUS);
+
+function fillWorkbenchSelects() {
+  const jobSel = document.getElementById('wb-job');
+  const resumeSel = document.getElementById('wb-resume');
+  // 旧版 HTML（浏览器缓存）里没有工作台，这里必须提前退出。
+  // 它在启动流程的 Promise.then 里被调用，抛错会变成未捕获的 Promise 异常，
+  // 后面所有初始化（列表渲染）全部不执行 —— 用户看到的就是"数据全没有"
+  if (!jobSel || !resumeSel) return;
+
+  const prevJob = jobSel.value;
+  jobSel.innerHTML = '<option value="">选择岗位</option>' +
+    state.jobs.map((j) => `<option value="${j.id}">#${j.id} ${esc(j.title || '未命名')}</option>`).join('');
+  if (prevJob) jobSel.value = prevJob;
+
+  // 简历下拉：主简历排最前（后端已排序），没有显式设置时默认选第一份
+  const prevResume = resumeSel.value;
+  const usable = state.resumes.filter((r) => r.has_profile);
+  resumeSel.innerHTML = usable.length
+    ? usable.map((r) => `<option value="${r.id}">#${r.id} ${esc(r.file_name)}${r.is_default ? '（主）' : ''}</option>`).join('')
+    : '<option value="0">（没有解析好的简历）</option>';
+  if (prevResume && usable.some((r) => String(r.id) === prevResume)) resumeSel.value = prevResume;
+}
+
+async function loadWorkbench(jobId) {
+  const body = document.getElementById('wb-body');
+  const statusEl = document.getElementById('wb-status');
+  const resumeSel = document.getElementById('wb-resume');
+  const resumeId = Number(resumeSel.value) || null;
+
+  statusEl.textContent = '加载中…';
+  body.innerHTML = '<div class="panel"><div class="empty">加载中…</div></div>';
+  try {
+    const [job, matches, appRes, chatlogs] = await Promise.all([
+      api(`/api/jobs/${jobId}`),
+      resumeId
+        ? api(`/api/resumes/${resumeId}/matches?include_rejected=true&job_id=${jobId}`)
+        : Promise.resolve(null),
+      api(`/api/applications/by-job/${jobId}`),
+      // 聊天记录按岗位关联：扩展同步时按标题匹配到了才有
+      api(`/api/chat-logs?job_id=${jobId}`).catch(() => ({ items: [] })),
+    ]);
+    let timeline = [];
+    if (appRes.exists) {
+      const detail = await api(`/api/applications/${appRes.id}`);
+      timeline = detail.timeline || [];
+    }
+
+    // 下一步建议：规则算的，秒回。传当前状态过去而不是让后端再查一遍，
+    // 避免为了一个提示再跑一次匹配
+    const matchItem = (matches && matches.items && matches.items[0]) || null;
+    const chatItems = (chatlogs && chatlogs.items) || [];
+    let nextStep = null;
+    try {
+      nextStep = await api('/api/workbench/next-step', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: jobId,
+          match_decision: matchItem ? matchItem.decision : 'none',
+          missed_skills: (matchItem && matchItem.missed_skills) || [],
+          app_status: appRes.exists ? appRes.status : 'none',
+          last_role: chatItems.length ? chatItems[chatItems.length - 1].role : null,
+          chat_count: chatItems.length,
+        }),
+      });
+    } catch { /* 建议算不出来不影响工作台其他部分 */ }
+
+    statusEl.textContent = '';
+    renderWorkbench(jobId, job, matches, appRes, timeline, chatlogs, nextStep);
+  } catch (e) {
+    statusEl.textContent = e.message;
+    body.innerHTML = '';
+  }
+}
+
+function renderWorkbench(jobId, job, matches, appRes, timeline, chatlogs, nextStep) {
+  const body = document.getElementById('wb-body');
+  const profile = (job && job.profile) || {};
+  const basic = profile.basic || {};
+  const meta = [
+    profile.company || '',
+    profile.city || '',
+    job && job.salary,
+    basic.edu_level ? `${basic.edu_level}${basic.edu_fulltime_required === false ? '' : ''}` : '',
+  ].filter(Boolean).join(' · ');
+
+  // 匹配结论：选了简历才有；没匹配结果是"还没算过"而不是"不匹配"
+  const match = matches && matches.items.length ? matches.items[0] : null;
+  const matchHtml = !matches
+    ? '<div class="empty">先在上面选一份简历，才能看这份岗位跟你的匹配结论。</div>'
+    : !match
+      ? '<div class="empty">没有匹配结论 —— 该岗位可能缺少画像或被过滤。可到「匹配」页点开始。</div>'
+      : `
+        <div class="match-head">
+          <span class="badge ${match.decision === 'pass' ? 'ok' : match.decision === 'reject' ? 'bad' : 'warn'}">${DECISION_LABEL[match.decision] || match.decision}</span>
+          ${match.score != null ? `<span class="score">${match.score} 分</span>` : ''}
+          ${matches.cached ? '<span class="item-meta">（缓存结论）</span>' : ''}
+        </div>
+        <ul class="reason-list">${(match.reasons || []).slice(0, 6).map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+        ${(match.missed_skills || []).length
+          ? `<div class="item-meta" style="margin-top:6px">未覆盖的必备技能：<span class="missed">${esc(match.missed_skills.join('、'))}</span></div>`
+          : ''}`;
+
+  // 投递状态：手动推进，不做自动推断 —— 从聊天记录猜「约了面试」误判的代价是错过跟进
+  const statusRow = WB_STATUS.map(([key, label]) => {
+    const current = appRes.exists && appRes.status === key;
+    return `<button class="small ${current ? 'primary' : ''}" data-wb-status="${key}" ${current ? 'disabled' : ''}>${label}</button>`;
+  }).join('');
+  const statusHtml = `
+    <div class="wb-status-row">${statusRow}</div>
+    ${appRes.exists
+      ? `<div class="item-meta">当前：${appRes.status_label} · 更新于 ${formatWhen(appRes.updated_at)}</div>
+         ${timeline.length ? `<details><summary class="link-btn" style="cursor:pointer">时间线（${timeline.length} 条）</summary>
+           <ul class="reason-list">${timeline.map((t) => `<li>${WB_STATUS_LABEL[t.status] || t.status} · ${formatWhen(t.created_at)}${t.note ? ' — ' + esc(t.note) : ''}</li>`).join('')}</ul>
+         </details>` : ''}`
+      : '<div class="item-meta">还没有跟踪记录。点上面任意状态开始跟踪这个岗位。</div>'}`;
+
+  body.innerHTML = `
+    <div class="panel">
+      <div class="item-row">
+        <div class="item-main">
+          <div class="item-title"><span class="match-title">${esc((job.profile && job.profile.title) || '未命名岗位')}</span></div>
+          <div class="item-meta">${esc(meta)}</div>
+          ${job.url ? `<a class="item-meta" href="${esc(job.url)}" target="_blank" rel="noreferrer">原站链接 ↗</a>` : ''}
+        </div>
+      </div>
+    </div>
+    ${nextStep ? `
+    <div class="panel" style="border-left:3px solid ${
+      nextStep.urgency === 'high' ? 'var(--primary)'
+      : nextStep.urgency === 'warn' ? 'var(--warn)'
+      : nextStep.urgency === 'muted' ? 'var(--line-strong)'
+      : 'var(--line-strong)'}">
+      <div class="sec-title">下一步</div>
+      <div class="item-title" style="font-size:15px;margin-bottom:4px">${esc(nextStep.action)}</div>
+      <div class="item-meta">${esc(nextStep.reason)}</div>
+    </div>` : ''}
+    <div class="panel">
+      <div class="sec-title">匹配结论（简历 #${document.getElementById('wb-resume').value}）</div>
+      ${matchHtml}
+    </div>
+    <div class="panel">
+      <div class="sec-title">投递状态</div>
+      ${statusHtml}
+    </div>
+    <div class="panel">
+      <div class="sec-title">定制简历</div>
+      <p class="hint">按这个岗位改写你选的简历并生成 Word。PDF 来源会先转成 Word 保版式，只改文字。</p>
+      <button id="btn-wb-tailor" class="primary">生成定制版 Word（约 20–40 秒）</button>
+      <div id="wb-tailor-result" style="margin-top:10px"></div>
+    </div>
+    <div class="panel">
+      <div class="sec-title">HR 沟通记录</div>
+      ${(chatlogs.items || []).length
+        ? `<ul class="reason-list">${(chatlogs.items || []).slice(-20).map((c) => `
+            <li><b>${esc(c.role)}</b>：${esc(c.content.length > 120 ? c.content.slice(0, 120) + '…' : c.content)}</li>`).join('')}</ul>
+           <p class="hint">由浏览器扩展自动同步，最后一次同步的整段对话都在这里。</p>`
+        : '<div class="empty">还没有同步到这个岗位的聊天记录。在招聘网站的沟通页打开「帮我回复」面板，它会自动把最近消息同步过来。</div>'}
+    </div>`;
+
+  // 状态推进：已跟踪走 PATCH，首次走 POST（幂等，同岗位重复创建返回已有记录）
+  body.querySelectorAll('[data-wb-status]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const status = btn.dataset.wbStatus;
+      await withLoading(btn, '…', async () => {
+        try {
+          if (appRes.exists) {
+            await api(`/api/applications/${appRes.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ status }),
+            });
+          } else {
+            await api('/api/applications', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ job_id: jobId, status }),
+            });
+          }
+          toast(`已更新为「${WB_STATUS_LABEL[status]}」`);
+          loadWorkbench(jobId);
+          loadWorkbenchStats();
+        } catch (e) { toast(e.message, true); }
+      });
+    });
+  });
+
+  const tailorBtn = body.querySelector('#btn-wb-tailor');
+  tailorBtn.addEventListener('click', async () => {
+    const resumeSel = document.getElementById('wb-resume');
+    const rid = Number(resumeSel.value) || 0;
+    if (!rid) { toast('先在上面选一份简历', true); return; }
+    const resultBox = body.querySelector('#wb-tailor-result');
+    await withLoading(tailorBtn, '生成中…', async () => {
+      resultBox.innerHTML = '<div class="msg">正在按岗位改写并生成 Word，约 20–40 秒…</div>';
+      try {
+        const data = await api(`/api/resumes/${rid}/tailor/${jobId}`, { method: 'POST' });
+        const originNote = data.origin === 'docx'
+          ? '在你的原 Word 上只改文字，版式未动'
+          : data.origin === 'pdf_converted'
+            ? '原 PDF 已按原版式转成 Word，只改文字'
+            : '原 PDF 无法保版式转换，此为重建版';
+        resultBox.innerHTML = `
+          <div class="item-meta">${esc(originNote)} · ${data.accepted} 处改动 · ¥${(data.cost_cny || 0).toFixed(4)}</div>
+          ${data.download_url
+            ? `<a class="link-btn" href="${data.download_url}" target="_blank" rel="noreferrer">下载 Word ↓</a>`
+            : `<div class="item-meta" style="color:var(--danger)">${esc(data.note || '未生成')}</div>`}
+          ${data.accepted === 0 && data.download_url ? '<div class="item-meta">内容与原文一致（没有需要自动改的地方）</div>' : ''}`;
+      } catch (e) {
+        resultBox.innerHTML = `<div class="item-meta" style="color:var(--danger)">${esc(e.message)}</div>`;
+      }
+    });
+  });
+}
+
+async function loadWorkbenchStats() {
+  const box = document.getElementById('wb-stats-box');
+  if (!box) return;
+  try {
+    const s = await api('/api/applications/stats');
+    // 没有任何跟踪记录时不占屏
+    if (!s.tracked) { box.innerHTML = ''; return; }
+
+    const cards = WB_STATUS.map(([key, label]) => `
+      <div class="summary-item ${key === 'offer' ? 'pass' : key === 'rejected' ? 'reject' : ''}">
+        <div class="n">${s.status_counts[key] || 0}</div><div class="t">${label}</div>
+      </div>`).join('');
+    const rate = s.reply_rate != null ? `${(s.reply_rate * 100).toFixed(0)}%` : '—';
+
+    box.innerHTML = `
+      <div class="panel">
+        <div class="sec-title">整体进展（跟踪 ${s.tracked} 个岗位）</div>
+        <div class="summary-bar">${cards}
+          <div class="summary-item pass"><div class="n">${rate}</div><div class="t">回复率</div></div>
+        </div>
+        ${s.by_source.length ? `
+          <table style="width:100%;font-size:12px;border-collapse:collapse">
+            <tr style="color:#6b7078;text-align:left">
+              <th style="font-weight:500;padding:4px 8px">平台</th>
+              <th style="font-weight:500;padding:4px 8px">跟踪</th>
+              <th style="font-weight:500;padding:4px 8px">有回复</th>
+            </tr>
+            ${s.by_source.map((r) => `
+              <tr style="border-top:1px solid #eef0f3">
+                <td style="padding:4px 8px">${esc(r.label)}</td>
+                <td style="padding:4px 8px">${r.total}</td>
+                <td style="padding:4px 8px">${r.replied}</td>
+              </tr>`).join('')}
+          </table>
+          <p class="hint">回复率基于扩展同步的聊天记录，只反映「有 HR 消息」的岗位，可能略高于真实回复率。</p>`
+        : '<p class="hint">同步聊天记录后（在招聘网站沟通页打开「帮我回复」），这里会显示各平台的回复率。</p>'}
+      </div>`;
+  } catch {
+    box.innerHTML = '';
+  }
+}
+
+// 可选区块的绑定一律先判空：index.html 与新 app.js 版本不一致时
+// （浏览器缓存了旧 HTML），直接 .addEventListener 会抛 TypeError，
+// 整段脚本中断，页面变成"样式对但数据全空"——踩过一次，很难看出原因
+const wbLoadBtn = document.getElementById('btn-wb-load');
+if (wbLoadBtn) {
+  wbLoadBtn.addEventListener('click', () => {
+    const jobId = Number(document.getElementById('wb-job').value) || 0;
+    if (!jobId) { toast('先选择岗位', true); return; }
+    loadWorkbench(jobId);
+  });
+}
+const wbResumeSel = document.getElementById('wb-resume');
+if (wbResumeSel) {
+  wbResumeSel.addEventListener('change', () => {
+    const jobId = Number(document.getElementById('wb-job').value) || 0;
+    if (jobId) loadWorkbench(jobId);
+  });
+}
+
+/* ---------- 启动 ---------- */
+
+/* ---------- 对话（ChatAgent，DeepSeek 式排布） ---------- */
+
+const chatState = {
+  conversationId: Number(localStorage.getItem('chatConversationId')) || null,
+  sending: false,
+  lastUserText: '',
+};
+
+function chatBox() {
+  return document.getElementById('chat-msgs');
+}
+
+function scrollToBottom() {
+  const el = document.getElementById('chat-scroll');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+function hideEmpty() {
+  const el = document.getElementById('chat-empty');
+  if (el) el.style.display = 'none';
+}
+
+function showEmpty() {
+  const el = document.getElementById('chat-empty');
+  if (el) el.style.display = '';
+}
+
+/** 清掉 Boss 链接里的跟踪参数，展示干净的投递地址 */
+function cleanJobUrl(u) {
+  try {
+    const url = new URL(u);
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(pk|ka|lid|sessionid)$/i.test(key)) url.searchParams.delete(key);
+    }
+    return url.toString();
+  } catch {
+    return u;
+  }
+}
+
+/** 转义后的文本里把 URL 变成可点的链接（回复模型偶尔仍会贴链接，兜底） */
+function linkify(escaped) {
+  return escaped.replace(/https?:\/\/[^\s<）)】，。]+/g, (raw) => {
+    const href = cleanJobUrl(raw);
+    return `<a href="${href}" target="_blank" rel="noreferrer">投递链接 ↗</a>`;
+  });
+}
+
+function appendUser(text) {
+  hideEmpty();
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-user';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.innerHTML = esc(text);
+  wrap.appendChild(bubble);
+  chatBox().appendChild(wrap);
+  scrollToBottom();
+}
+
+function appendAssistant() {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-assistant';
+  wrap.innerHTML = `
+    <div class="msg-head"><span class="msg-mark">求</span><span class="msg-role">求职助手</span></div>
+    <div class="msg-body"></div>`;
+  chatBox().appendChild(wrap);
+  scrollToBottom();
+  return { root: wrap, body: wrap.querySelector('.msg-body') };
+}
+
+/** 执行过程：进行中展开显示最新一步，完成后收成一行「已完成 N 步」 */
+function traceHtml(steps, running) {
+  if (!steps.length && !running) return '';
+  const last = steps.length ? steps[steps.length - 1] : '准备中…';
+  const summary = running
+    ? `<span class="trace-spin"></span><span>${esc(last)}</span>`
+    : `<span>已完成 ${steps.length} 步</span>`;
+  return `<details class="chat-trace"${running ? ' open' : ''}>
+    <summary>${summary}</summary>
+    <ol>${steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
+  </details>`;
+}
+
+/** 岗位以紧凑卡片嵌在回复里，可点链接投递 */
+function renderChatJobs(jobs) {
+  if (!jobs || !jobs.length) return '';
+  const label = { pass: '通过', confirm: '待确认', reject: '否决' };
+  const cls = { pass: 'ok', confirm: 'warn', reject: 'bad' };
+  return `<div class="chat-jobs">${jobs.map((j) => `
+    <div class="chat-job">
+      <div class="chat-job-head">
+        <span class="job-name-text">${esc(j.title || '未命名岗位')}</span>
+        <span class="badge ${cls[j.decision] || ''}">${label[j.decision] || j.decision}</span>
+        ${j.score != null ? `<span class="score">${j.score} 分</span>` : ''}
+        ${j.url ? `<a class="apply-link" href="${cleanJobUrl(j.url)}" target="_blank" rel="noreferrer">去投递 ↗</a>` : ''}
+      </div>
+      <div class="item-meta">
+        ${esc([j.company, j.city].filter(Boolean).join(' · '))}
+        ${j.semantic_sim != null ? ` · 语义相关 ${j.semantic_sim}` : ''}
+      </div>
+      ${(j.missed_skills || []).length
+        ? `<div class="item-meta missed">缺：${esc(j.missed_skills.join('、'))}</div>` : ''}
+    </div>`).join('')}</div>`;
+}
+
+function addMsgActions(ctx, reply) {
+  const bar = document.createElement('div');
+  bar.className = 'msg-actions';
+  const copy = document.createElement('button');
+  copy.textContent = '复制';
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reply || '');
+      copy.textContent = '已复制';
+      setTimeout(() => { copy.textContent = '复制'; }, 1500);
+    } catch {
+      copy.textContent = '复制失败';
+    }
+  });
+  const retry = document.createElement('button');
+  retry.textContent = '重新生成';
+  retry.addEventListener('click', () => {
+    if (!chatState.lastUserText || chatState.sending) return;
+    sendChat(chatState.lastUserText);
+  });
+  bar.appendChild(copy);
+  bar.appendChild(retry);
+  ctx.body.appendChild(bar);
+}
+
+
+/** 渲染一条历史消息（刷新页面后恢复对话，不然等于没保存） */
+function renderStoredMessage(msg) {
+  if (msg.role === 'user') {
+    appendUser(msg.content || '');
+    return;
+  }
+  const ctx = appendAssistant();
+  const meta = msg.meta || {};
+  ctx.body.innerHTML =
+    `<div class="msg-text">${linkify(esc(msg.content || '')).replace(/\n/g, '<br>')}</div>` +
+    renderChatJobs(meta.jobs);
+  addMsgActions(ctx, msg.content || '');
+}
+
+async function loadConversation(id) {
+  try {
+    const conv = await api(`/api/chat/${id}`);
+    chatBox().innerHTML = '';
+    hideEmpty();
+    for (const msg of conv.messages || []) renderStoredMessage(msg);
+    chatState.conversationId = conv.id;
+    document.getElementById('chat-conv-id').textContent =
+      `会话 #${conv.id}` + (conv.messages ? ` · ${conv.messages.length} 条` : '');
+    if (!(conv.messages || []).length) showEmpty();
+  } catch (e) {
+    // 会话不存在（数据库被清过）时退回空状态，不要把用户卡在报错里
+    chatState.conversationId = null;
+    localStorage.removeItem('chatConversationId');
+    document.getElementById('chat-conv-id').textContent = '新对话';
+    showEmpty();
+  }
+}
+
+async function toggleHistoryMenu() {
+  const menu = document.getElementById('chat-history-menu');
+  if (menu.classList.contains('open')) {
+    menu.classList.remove('open');
+    return;
+  }
+  menu.innerHTML = '<div class="hist-empty">读取中…</div>';
+  menu.classList.add('open');
+  try {
+    const data = await api('/api/chat');
+    const items = (data.items || []).slice(0, 15);
+    if (!items.length) {
+      menu.innerHTML = '<div class="hist-empty">还没有历史会话</div>';
+      return;
+    }
+    menu.innerHTML = items.map((c) => `
+      <button class="hist-item" data-conv="${c.id}">
+        <span class="hist-title">${esc(c.title || '未命名会话')}</span>
+        <span class="hist-meta">#${c.id} · ${c.messages} 条</span>
+      </button>`).join('');
+    menu.querySelectorAll('[data-conv]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        menu.classList.remove('open');
+        loadConversation(Number(btn.dataset.conv));
+      });
+    });
+  } catch (e) {
+    menu.innerHTML = `<div class="hist-empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function sendChat(text) {
+  if (chatState.sending) return;
+  chatState.sending = true;
+  chatState.lastUserText = text;
+  document.getElementById('btn-chat-send').disabled = true;
+
+  appendUser(text);
+  const ctx = appendAssistant();
+
+  const steps = [];
+  const paint = (running) => {
+    ctx.body.innerHTML = traceHtml(steps, running);
+    scrollToBottom();
+  };
+  paint(true);
+
+  try {
+    const resp = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text, conversation_id: chatState.conversationId }),
+    });
+    if (!resp.ok || !resp.body) throw new Error(`服务异常（${resp.status}）`);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let finished = false;
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 2);
+        if (!frame.startsWith('data:')) continue;
+        const evt = JSON.parse(frame.slice(5).trim());
+        if (evt.type === 'step') {
+          steps.push(evt.label);
+          paint(true);
+        } else if (evt.type === 'done') {
+          finished = true;
+          chatState.conversationId = evt.conversation_id;
+          localStorage.setItem('chatConversationId', String(evt.conversation_id));
+          document.getElementById('chat-conv-id').textContent = `会话 #${evt.conversation_id}`;
+          const finalSteps = evt.steps || steps;
+          ctx.body.innerHTML =
+            `${traceHtml(finalSteps, false)}<div class="msg-text">${linkify(esc(evt.reply || '')).replace(/\n/g, '<br>')}</div>` +
+            renderChatJobs(evt.jobs);
+          addMsgActions(ctx, evt.reply || '');
+          scrollToBottom();
+        } else if (evt.type === 'error') {
+          throw new Error(evt.message || '处理失败');
+        }
+      }
+    }
+  } catch (e) {
+    // 流式不可用时退回一次性接口，保证功能不被传输层绑死
+    try {
+      const data = await api('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, conversation_id: chatState.conversationId }),
+      });
+      chatState.conversationId = data.conversation_id;
+      localStorage.setItem('chatConversationId', String(data.conversation_id));
+      document.getElementById('chat-conv-id').textContent = `会话 #${data.conversation_id}`;
+      const finalSteps = data.steps || steps;
+      ctx.body.innerHTML =
+        `${traceHtml(finalSteps, false)}<div class="msg-text">${linkify(esc(data.reply || '')).replace(/\n/g, '<br>')}</div>` +
+        renderChatJobs(data.jobs);
+      addMsgActions(ctx, data.reply || '');
+    } catch (e2) {
+      ctx.body.innerHTML = `<div class="msg-text" style="color:var(--danger)">${esc(e2.message || e.message)}</div>`;
+    }
+  } finally {
+    chatState.sending = false;
+    document.getElementById('btn-chat-send').disabled = false;
+    scrollToBottom();
+  }
+}
+
+function autosizeInput(el) {
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
+}
+
+document.getElementById('btn-chat-send').addEventListener('click', () => {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  autosizeInput(input);
+  sendChat(text);
+});
+
+document.getElementById('chat-input').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey) {
+    ev.preventDefault();
+    document.getElementById('btn-chat-send').click();
+  }
+});
+document.getElementById('chat-input').addEventListener('input', (ev) => {
+  autosizeInput(ev.currentTarget);
+});
+
+document.getElementById('btn-chat-new').addEventListener('click', () => {
+  chatState.conversationId = null;
+  chatState.lastUserText = '';
+  localStorage.removeItem('chatConversationId');
+  document.getElementById('chat-conv-id').textContent = '新对话';
+  chatBox().innerHTML = '';
+  document.getElementById('chat-history-menu').classList.remove('open');
+  showEmpty();
+  document.getElementById('chat-input').focus();
+});
+
+document.getElementById('btn-chat-history').addEventListener('click', (ev) => {
+  ev.stopPropagation();
+  toggleHistoryMenu();
+});
+document.addEventListener('click', (ev) => {
+  const menu = document.getElementById('chat-history-menu');
+  if (menu && !menu.contains(ev.target)) menu.classList.remove('open');
+});
+
+// 页面加载时恢复上一次的会话：会话是存库的，不该刷新就消失
+if (chatState.conversationId) {
+  loadConversation(chatState.conversationId);
+}
+
+document.getElementById('chat-samples').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-sample]');
+  if (btn) sendChat(btn.dataset.sample);
+});
+
+async function checkHealth() {
+  const node = document.getElementById('health');
+  try {
+    const data = await api('/health');
+    if (!data.db) {
+      node.textContent = '数据库不可用';
+      node.className = 'health bad';
+    } else if (!data.llm_configured) {
+      node.textContent = '未配置模型密钥';
+      node.className = 'health bad';
+    } else {
+      node.textContent = '就绪';
+      node.className = 'health ok';
+    }
+  } catch {
+    node.textContent = '服务未响应';
+    node.className = 'health bad';
+  }
+}
+
+// 构建标记：页脚显示，用来一眼确认浏览器加载的是不是最新版。
+// 踩过这个坑：改完样式，用户看到的是旧标签页，界面"完全没变化"，
+// 分不清是没生效还是没刷新——有这个标记就不用猜。
+const BUILD_TAG = '2026-10-23a · iOS 主题';
+const buildTagEl = document.getElementById('build-tag');
+if (buildTagEl) buildTagEl.textContent = BUILD_TAG;
+
+checkHealth();
+
+// 视图恢复必须独立于数据加载：之前挂在 Promise.all().then() 里，
+// 链条里任何一步抛错就整段不执行，用户点「工作台」看到的还是简历页，
+// 而且控制台没有任何提示，完全查不出来。
+const initialView = (location.hash || '').replace('#', '');
+if (initialView) activateView(initialView);
+
+loadResumes().then(fillWorkbenchSelects).catch(() => {});
+loadJobs()
+  .then(() => {
+    fillWorkbenchSelects();
+    if (initialView === 'workbench') loadWorkbenchStats();
+  })
+  .catch(() => {});

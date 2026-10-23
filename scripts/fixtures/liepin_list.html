@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>猎聘职位列表（结构快照）</title></head>
+<body>
+<!--
+  猎聘列表页的结构快照，2026-10-22 依据用户现场诊断的类名手工构造。
+  真实页面是纯客户端渲染，curl 拿不到岗位节点，只能按已验证的类名合成：
+
+    .jobCardPcContainer  -> 42 个/页（卡片）
+    .jobTitleBox         -> 标题（内含 a[href*="/job/"] 和「急聘」角标）
+    .jobCompanyInfoBox   -> 公司
+    .jobCardRightBox     -> 薪资
+    .jobDetailBox        -> 详情区（列表页为空）
+
+  用途：验证 content.js 在类名正确时能解析出卡片、标题、链接与去重键。
+  注意它不是真实页面，改版后真实类名若变，这份快照不会自动发现。
+-->
+<div id="app">
+  <div class="jobCardPcContainer">
+    <div class="jobTitleBox"><a href="https://www.liepin.com/job/100000.shtml" target="_blank">Java开发实习生</a><span>急聘</span></div>
+    <div class="jobCompanyInfoBox">正浩EcoFlow</div>
+    <div class="jobCardRightBox">200-250元/天</div>
+    <div class="jobDetailBox"></div>
+  </div>
+  <div class="jobCardPcContainer">
+    <div class="jobTitleBox"><a href="https://www.liepin.com/job/100001.shtml" target="_blank">java全栈开发</a><span>学生可投</span></div>
+    <div class="jobCompanyInfoBox">佛山市数字产业发展有限公司</div>
+    <div class="jobCardRightBox">100-150元/天</div>
+    <div class="jobDetailBox"></div>
+  </div>
+  <div class="jobCardPcContainer">
+    <div class="jobTitleBox"><a href="https://www.liepin.com/job/100002.shtml" target="_blank">后端开发实习生</a></div>
+    <div class="jobCompanyInfoBox">友邦资讯科技(广州)有限公司</div>
+    <div class="jobCardRightBox">180-200元/天</div>
+    <div class="jobDetailBox"></div>
+  </div>
+</div>
+</body>
+</html>

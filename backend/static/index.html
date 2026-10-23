@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>求职助手</title>
+<link rel="stylesheet" href="./style.css?v=20261023a">
+</head>
+<body>
+
+<div class="app">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">求</span>
+      <span class="brand-name">
+        <span class="brand-text">求职助手</span>
+        <span class="brand-sub">本地求职 Agent</span>
+      </span>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-view="resumes">简历</button>
+      <button class="tab" data-view="jobs">岗位</button>
+      <button class="tab" data-view="match">匹配</button>
+      <button class="tab" data-view="workbench">工作台</button>
+      <button class="tab" data-view="review">建议</button>
+      <button class="tab" data-view="chat">对话</button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="health" id="health">检查中</div>
+      <div class="ver">本地运行 · 数据不出本机</div>
+      <div class="ver" id="build-tag"></div>
+    </div>
+  </aside>
+
+  <main>
+
+    <!-- 简历 -->
+    <section class="view active" id="view-resumes">
+      <header class="page-head">
+        <h1>简历</h1>
+        <p>上传 PDF 或 Word 后自动解析成结构化画像。Word / 文本层 PDF 约 1 秒；扫描件走本地 OCR 需要 1–2 分钟。想按岗位定制简历，优先传 Word（能在原文件上改）。</p>
+      </header>
+
+      <div class="panel">
+        <div class="row">
+          <input type="file" id="resume-file" accept=".pdf,.docx">
+          <button id="btn-upload" class="primary">上传并解析</button>
+        </div>
+        <p class="status" id="upload-status"></p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>已上传</h2>
+          <span class="count" id="resume-count"></span>
+        </div>
+        <div class="list" id="resume-list"></div>
+      </div>
+    </section>
+
+    <!-- 岗位 -->
+    <section class="view" id="view-jobs">
+      <header class="page-head">
+        <h1>岗位</h1>
+        <p>粘贴 JD 全文，后端抽取硬约束字段与必备/加分技能。插件抓来的岗位会自动清洗掉页面噪声。</p>
+      </header>
+
+      <div class="panel">
+        <textarea id="jd-text" rows="7" placeholder="粘贴岗位描述全文：岗位名称、城市、工作性质、职责与任职要求…"></textarea>
+        <div class="row">
+          <button id="btn-ingest" class="primary">解析并入库</button>
+        </div>
+        <p class="status" id="ingest-status"></p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>岗位库</h2>
+          <span class="count" id="job-count"></span>
+          <label class="sort-control">按哪份简历
+            <select id="job-sort-resume">
+              <option value="">不排序</option>
+            </select>
+          </label>
+          <label class="sort-control">排序方式
+            <select id="job-sort-mode">
+              <option value="score">分数降序</option>
+              <option value="decision">通过优先</option>
+            </select>
+          </label>
+        </div>
+        <div class="platform-bar" id="platform-bar"></div>
+        <div class="list" id="job-list"></div>
+      </div>
+    </section>
+
+    <!-- 匹配 -->
+    <section class="view" id="view-match">
+      <header class="page-head">
+        <h1>匹配</h1>
+        <p>硬约束（学历 / 城市 / 工作性质 / 必备技能）先过滤，通过的才排序。否决项不会被加分抵消。</p>
+      </header>
+
+      <div class="panel">
+        <div class="form-block">
+          <span class="form-label">条件</span>
+          <div class="form-controls">
+            <label class="field">简历
+              <select id="match-resume"></select>
+            </label>
+            <label class="field">期望城市
+              <input id="match-cities" placeholder="北京,杭州" size="14">
+            </label>
+          </div>
+        </div>
+        <div class="form-block">
+          <span class="form-label">偏好</span>
+          <div class="form-controls">
+            <label class="check"><input type="checkbox" id="match-relocation"> 接受异地</label>
+            <label class="check"><input type="checkbox" id="match-outsourcing" checked> 接受外包</label>
+            <label class="check"><input type="checkbox" id="match-internship"> 接受实习</label>
+            <label class="check"><input type="checkbox" id="match-rejected"> 显示被否决</label>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button id="btn-match" class="primary">开始匹配</button>
+          <button id="btn-relax">放宽约束看看</button>
+          <span class="hint" style="margin:0">期望城市留空时，按简历推断的当前城市判断。</span>
+        </div>
+        <p class="status" id="match-status"></p>
+      </div>
+      <div id="match-result"></div>
+      <div id="relax-result"></div>
+    </section>
+
+    <!-- 对话 -->
+    <section class="view chat-view" id="view-chat">
+      <div class="chat-shell">
+        <header class="chat-top">
+          <div class="chat-title">
+            <span class="chat-title-main">求职对话</span>
+            <span class="chat-title-sub" id="chat-conv-id">新对话</span>
+          </div>
+          <div class="chat-top-actions">
+            <div class="hist-wrap">
+              <button class="link-btn" id="btn-chat-history">历史会话</button>
+              <div class="hist-menu" id="chat-history-menu"></div>
+            </div>
+            <button class="link-btn" id="btn-chat-new">＋ 新对话</button>
+          </div>
+        </header>
+
+        <div class="chat-scroll" id="chat-scroll">
+          <div class="chat-msgs" id="chat-msgs"></div>
+          <div class="chat-empty" id="chat-empty">
+            <div class="chat-empty-mark">求</div>
+            <h2>想找什么样的工作？</h2>
+            <p>说方向、城市和偏好，我会挑简历、检索岗位、算匹配，再告诉你怎么改、去哪投。</p>
+            <div class="chat-samples" id="chat-samples">
+              <button data-sample="我想找 AI Agent 方向的后端开发，目标城市深圳">找 AI Agent 方向的后端岗</button>
+              <button data-sample="看一下我现在的简历适合投什么岗位">看看我的简历适合投什么</button>
+              <button data-sample="佛山有哪些 Java 后端岗位">佛山有哪些 Java 岗位</button>
+              <button data-sample="我投这个方向还差什么">我投这个方向还差什么</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="chat-composer">
+          <div class="composer-box">
+            <textarea id="chat-input" rows="1" placeholder="描述你想找的工作…"></textarea>
+            <button id="btn-chat-send" class="send-btn" title="发送">↑</button>
+          </div>
+          <div class="composer-foot">Enter 发送 · Shift+Enter 换行 · 数据不出本机</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 工作台：一个岗位的所有动作都在这一页 -->
+    <section class="view" id="view-workbench">
+      <header class="page-head">
+        <h1>岗位工作台</h1>
+        <p>一个岗位的所有动作都在这一页：匹配结论、定制简历、投递状态。</p>
+      </header>
+
+      <div class="panel">
+        <div class="row wrap">
+          <label class="field">选择岗位
+            <select id="wb-job" style="min-width:280px"></select>
+          </label>
+          <label class="field">用哪份简历
+            <select id="wb-resume" style="min-width:220px"></select>
+          </label>
+          <button id="btn-wb-load" class="primary">打开工作台</button>
+        </div>
+        <p class="status" id="wb-status"></p>
+      </div>
+      <div id="wb-stats-box"></div>
+      <div id="wb-body"><div class="panel"><div class="empty">先选择一个岗位。</div></div></div>
+    </section>
+
+    <!-- 建议 -->
+    <section class="view" id="view-review">
+      <header class="page-head">
+        <h1>建议</h1>
+        <p>定向改写会复用匹配引擎算出的缺口。生成需要 20–40 秒，改写示例逐条通过事实核查，未通过的会明确标注。生成 Word 时只改文字，不重排你的版式。</p>
+      </header>
+
+      <div class="panel">
+        <div class="row wrap">
+          <label class="field">简历
+            <select id="review-resume"></select>
+          </label>
+          <label class="field">目标岗位
+            <select id="review-job">
+              <option value="">不指定（普适体检）</option>
+            </select>
+          </label>
+          <button id="btn-review" class="primary">生成建议</button>
+        </div>
+        <p class="status" id="review-status"></p>
+      </div>
+      <div id="review-result"></div>
+    </section>
+
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="./app.js?v=20261023a"></script>
+</body>
+</html>

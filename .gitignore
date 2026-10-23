@@ -1,0 +1,24 @@
+# 虚拟环境
+.venv/
+
+# 运行时数据：上传的简历原文、Postgres 数据目录、日志、临时文件
+# 简历属敏感个人信息，绝不可进版本库
+data/
+
+# 密钥
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 编辑器
+.vscode/
+.idea/
+
+# 界面预览页（scripts/preview_ui.py 生成，仅本地调试用）
+backend/static/_preview*.html
+
+# 内部工作记录（含真实姓名、联系方式、内部讨论），不进公开仓库
+.workbuddy/

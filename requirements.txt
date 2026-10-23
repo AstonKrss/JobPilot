@@ -1,0 +1,32 @@
+# 直接依赖声明（不锁死版本，装完后由 requirements.lock.txt 提供精确锁定）
+# 装法：.venv/Scripts/python.exe -m pip install -r requirements.txt
+
+# Web 服务
+fastapi
+uvicorn[standard]
+python-multipart
+
+# PDF 文本层与坐标提取
+# 锁 <2：pymupdf 2.0 引入了 onnxruntime 依赖（自带 OCR 功能），wheel 63MB 且拖入
+# 一整套 AI 运行时。我们只用文本层提取与坐标，OCR 走本机 PaddleOCR，不需要它
+pymupdf>=1.24,<2
+
+# 数据库（psycopg3，支持 Python 3.13）
+psycopg[binary]
+psycopg-pool
+
+# 配置与校验
+pydantic
+pydantic-settings
+
+# DeepSeek 调用
+httpx
+
+# 中文检索式归并：拼音转换
+pypinyin
+python-docx
+
+# PDF → DOCX 保版式转换（定制简历时只改文字，不重排版式）。
+# 依赖 opencv-python-headless，装包约 60MB，属于重依赖；
+# 装不上时 pdf_convert 会返回 False 并回退到按画像重建，不影响主流程
+pdf2docx
