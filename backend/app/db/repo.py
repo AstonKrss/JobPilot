@@ -452,12 +452,19 @@ def create_job(
     *,
     source: str,
     raw_text: str,
+    raw_text_original: str | None = None,
     raw_html: str | None = None,
     url: str | None = None,
     source_job_id: str | None = None,
     detail_level: str = "unknown",
 ) -> int:
-    """同源同 ID 已存在则更新原文并返回原 id，避免同一岗位反复入库。"""
+    """同源同 ID 已存在则更新原文并返回原 id，避免同一岗位反复入库。
+
+    raw_text 存的是**清洗后**的文本（抽取用的是它），raw_text_original 存清洗前。
+    两份都留是有代价的（约多一倍字符），但只留一份的代价更大：
+    清洗规则改坏之后，既没法复现也没法回归 —— 这个项目就吃过这个亏，
+    想补一份真实样本时发现库里全是已清洗的文本。
+    """
     if source_job_id:
         row = conn.execute(
             "SELECT id FROM job WHERE source = %s AND source_job_id = %s",
@@ -468,6 +475,7 @@ def create_job(
             conn.execute(
                 """
                 UPDATE job SET raw_text = %s,
+                               raw_text_original = COALESCE(%s, raw_text_original),
                                raw_html = COALESCE(%s, raw_html),
                                url = COALESCE(%s, url),
                                detail_level = CASE
@@ -477,17 +485,18 @@ def create_job(
                                fetched_at = now()
                  WHERE id = %s
                 """,
-                (raw_text, raw_html, url, detail_level, row[0]),
+                (raw_text, raw_text_original, raw_html, url, detail_level, row[0]),
             )
             return int(row[0])
 
     row = conn.execute(
         """
-        INSERT INTO job (source, source_job_id, url, raw_html, raw_text, fetched_at, detail_level)
-        VALUES (%s, %s, %s, %s, %s, now(), %s)
+        INSERT INTO job (source, source_job_id, url, raw_html, raw_text,
+                         raw_text_original, fetched_at, detail_level)
+        VALUES (%s, %s, %s, %s, %s, %s, now(), %s)
         RETURNING id
         """,
-        (source, source_job_id, url, raw_html, raw_text, detail_level),
+        (source, source_job_id, url, raw_html, raw_text, raw_text_original, detail_level),
     ).fetchone()
     assert row is not None
     return int(row[0])
@@ -573,7 +582,8 @@ def get_default_resume_id(conn: psycopg.Connection) -> int | None:
 
 # ---------- 投递跟踪 ----------
 
-APPLICATION_STATUSES = ("candidate", "applied", "talking", "interview", "offer", "rejected")
+# 只有两个可写入状态：投了没。六态是历史设计，已废弃（见 schema.sql 的迁移注释）
+APPLICATION_STATUSES = ("candidate", "applied")
 
 
 def create_application(
@@ -702,14 +712,16 @@ def get_application_by_job(conn: psycopg.Connection, job_id: int) -> dict | None
 
 
 def get_application_stats(conn: psycopg.Connection) -> dict:
-    """投递进展聚合：状态分布、回复率、按平台分组。
+    """投递进展聚合：已投数 / 有回应数 / 按平台分组。
 
-    「有回复」的判据：该岗位关联的聊天记录里存在 HR 的消息。
-    两个已知噪音，如实说明：
-    1. 猎聘的系统提示（"您可以修改打招呼语"）会被扩展读成 HR 消息，
-       可能轻微抬高回复率；
-    2. chat_log 的 synced_at 是同步时间不是消息真实时间，
-       所以这里不算「平均响应时长」，只算回复率。
+    只给绝对数，不返回「回复率」。
+    原因：一轮求职通常只投十几家，样本不够时比率会剧烈波动，
+    而「投了 3 家、1 家有回应」是事实，「33% 回复率」是把噪音包装成结论。
+    界面上的数字会成为决策依据，那就不能给它一个不稳定的形态。
+
+    「有回应」的判据：该岗位关联的聊天记录里存在 HR 的消息。
+    一个已知噪音：猎聘的系统提示（"您可以修改打招呼语"）会被扩展读成 HR 消息，
+    可能轻微抬高这个数字。
     """
     status_rows = conn.execute(
         "SELECT status, count(*) FROM application GROUP BY status"
@@ -717,12 +729,9 @@ def get_application_stats(conn: psycopg.Connection) -> dict:
     status_counts = {s: int(n) for s, n in status_rows}
 
     tracked = sum(status_counts.values())
-    applied = sum(
-        n for s, n in status_counts.items()
-        if s in ("applied", "talking", "interview", "offer")
-    )
+    applied = status_counts.get("applied", 0)
 
-    # 有回复 = 跟踪中的岗位里，聊天记录出现过 HR 的消息
+    # 有回应 = 记录过的岗位里，聊天记录出现过 HR 的消息
     replied = conn.execute(
         """
         SELECT count(DISTINCT a.job_id)
@@ -742,7 +751,7 @@ def get_application_stats(conn: psycopg.Connection) -> dict:
         }
         for r in conn.execute(
             """
-            SELECT j.source, count(*),
+            SELECT j.source, count(*) FILTER (WHERE a.status = 'applied'),
                    count(*) FILTER (WHERE EXISTS (
                        SELECT 1 FROM chat_log cl
                         WHERE cl.job_id = a.job_id AND cl.role = 'HR'))
@@ -758,7 +767,6 @@ def get_application_stats(conn: psycopg.Connection) -> dict:
         "tracked": tracked,
         "applied": applied,
         "replied": int(replied),
-        "reply_rate": round(replied / applied, 4) if applied else None,
         "status_counts": status_counts,
         "by_source": by_source,
     }

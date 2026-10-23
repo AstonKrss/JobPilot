@@ -293,7 +293,7 @@ CREATE TABLE IF NOT EXISTS application (
     id         BIGSERIAL PRIMARY KEY,
     job_id     BIGINT NOT NULL REFERENCES job(id) ON DELETE CASCADE,
     status     TEXT NOT NULL DEFAULT 'candidate'
-               CHECK (status IN ('candidate', 'applied', 'talking', 'interview', 'offer', 'rejected')),
+               CHECK (status IN ('candidate', 'applied')),
     note       TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -429,3 +429,42 @@ CREATE TABLE IF NOT EXISTS episode (
     hit_count       INT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_episode_time ON episode (created_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- 保留清洗前的 JD 原文
+-- 之前只存了清洗后的文本（raw_text 名字叫 raw，实际是 cleaned），后果是：
+-- ① 清洗规则删了什么，事后无从查证
+-- ② 规则改坏之后没有原料做回归 —— 想补一份真实样本时发现库里全是加工过的
+-- ③ 抽取结果出错时无法判断是"原文就这样"还是"清洗删掉了"
+-- 已有数据补不回来（当时没存），从这次起新入库的都会留底。
+-- ---------------------------------------------------------------------------
+ALTER TABLE job ADD COLUMN IF NOT EXISTS raw_text_original TEXT;
+
+-- ---------------------------------------------------------------------------
+-- 投递状态从六态收敛到两态
+-- 六态（候选 / 已投 / 沟通中 / 面试 / Offer / 不合适）实测一次都没被手动点过：
+-- 招聘平台自带投递记录且是自动的，手动维护状态是纯负担。
+-- 现在系统只需要知道"投了没"，"有没有回应"由聊天记录带出来，不靠人填。
+-- 这段迁移必须幂等：init_schema 每次启动都跑，只在还留着旧约束时才动手。
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'application'::regclass
+           AND conname = 'application_status_check'
+           AND pg_get_constraintdef(oid) LIKE '%talking%'
+    ) THEN
+        -- 进展中的状态一律归为已投；「不合适」归为未投，但把来历写进 note，
+        -- 免得日后看到一条"未投"记录却想不起当初为什么
+        UPDATE application SET status = 'applied'
+         WHERE status IN ('talking', 'interview', 'offer');
+        UPDATE application
+           SET status = 'candidate',
+               note = coalesce(nullif(note, '') || ' | ', '') || '（历史状态：不合适）'
+         WHERE status = 'rejected';
+        ALTER TABLE application DROP CONSTRAINT application_status_check;
+        ALTER TABLE application
+            ADD CONSTRAINT application_status_check CHECK (status IN ('candidate', 'applied'));
+    END IF;
+END $$;

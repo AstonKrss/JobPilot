@@ -307,6 +307,30 @@
     return re.test(location.pathname) ? 'detail' : 'list';
   }
 
+  // 存一份裁剪后的 DOM。
+  //
+  // 为什么需要：入库只存了 innerText，结果是「清洗规则改坏了吗」「选择器还准吗」
+  // 这两个问题事后完全无法回答 —— 没有原料。库里 44 个岗位的 raw_html 全是空，
+  // 想补一份真实页面快照做回归都补不出来。
+  //
+  // 为什么要裁：BOSS 详情页的 outerHTML 常带几百 KB 的 base64 头像与内联脚本，
+  // 原样存单条就 2MB。去掉 script/style/svg 和 data: 图片后一般在 100KB 以内，
+  // 足够还原 DOM 结构（回归测试最需要的是结构，不是图片）。
+  function snapshotDom() {
+    try {
+      const clone = document.documentElement.cloneNode(true);
+      clone.querySelectorAll('script, style, link, svg, noscript, iframe, canvas').forEach((n) => n.remove());
+      clone.querySelectorAll('[src^="data:"]').forEach((n) => n.removeAttribute('src'));
+      clone.querySelectorAll('[srcset]').forEach((n) => n.removeAttribute('srcset'));
+      clone.querySelectorAll('[style]').forEach((n) => n.removeAttribute('style'));
+      let html = clone.outerHTML;
+      if (html.length > 400000) html = html.slice(0, 400000) + '\n<!-- truncated -->';
+      return html;
+    } catch {
+      return null; // 存不下来不影响抓取本身
+    }
+  }
+
   function scrapeDetail() {
     const found = pickJdContainer();
     const titleNode = pickContainer(TITLE_SELECTORS, 2, document);
@@ -776,6 +800,9 @@
       const ingest = await callApi('/api/jobs/ingest', 'POST', {
         source: SOURCE,
         raw_text: scraped.raw_text,
+        // 详情页顺带存一份裁剪后的 DOM：日后平台改版时，能拿它复现"当时页面长什么样"，
+        // 而不是只能凭诊断信息重新猜选择器
+        raw_html: snapshotDom(),
         url: scraped.url,
         source_job_id: scraped.source_job_id,
         detail_level: scraped.fallback ? 'digest' : 'full',

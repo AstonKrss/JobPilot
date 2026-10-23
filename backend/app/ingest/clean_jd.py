@@ -105,8 +105,26 @@ _SEO_LINK = re.compile(r"(招聘.{0,6}?){3,}")
 _PUA = re.compile(r"[\ue000-\uf8ff]")
 
 
+# 组合噪声行：「收藏 / 立即沟通 / 举报 / 微信扫码分享」把几个按钮文案塞在一行。
+# 插件抓 innerText 时这些按钮通常各占一行，单行规则就能删掉；
+# 但用户手动 Ctrl+A 复制网页内容时，它们常被压成一行 —— 整行不等于任何一个
+# 噪声词，于是混进正文被送去抽取，实测会让"举报""扫码分享"这类词干扰技能判断。
+# 判据从严：必须被分隔符切成 2~6 段，且**每一段**都是已知噪声才删。
+# 正文里的「Java / Python」也会被切成多段，但那些词不在表里，不会误伤。
+_COMBO_SEP = re.compile(r"\s*[/|·•、,，]\s*")
+
+
+def _is_combo_noise(line: str) -> bool:
+    parts = [p.strip() for p in _COMBO_SEP.split(line) if p.strip()]
+    if not 2 <= len(parts) <= 6:
+        return False
+    return all(p in NOISE_LINES for p in parts)
+
+
 def _is_noise(line: str) -> bool:
     if line in NOISE_LINES:
+        return True
+    if _is_combo_noise(line):
         return True
     if any(p.match(line) for p in NOISE_PATTERNS):
         return True
@@ -154,7 +172,12 @@ def clean_jd(text: str) -> str:
 
     for line in lines:
         if not in_body:
-            if line in ("职位描述", "职位要求", "岗位职责"):
+            # 正文起点。原来只认「职位描述 / 职位要求 / 岗位职责」，
+            # 但不少 JD 用的是「任职要求」「工作内容」开头 —— 认不出来就会走
+            # fallback（整段当正文），虽然结果差不多，但 head/body 的切分失准，
+            # 招聘者名片和 SEO 链接更容易漏网
+            if line in ("职位描述", "职位要求", "岗位职责",
+                        "任职要求", "工作内容", "任职资格", "工作要求"):
                 in_body = True
                 continue
             if _is_stop(line) or _is_noise(line):

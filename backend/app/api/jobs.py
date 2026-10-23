@@ -149,6 +149,9 @@ async def ingest_job(payload: JobIngestRequest) -> dict:
     cleaned = clean_jd(text)
     if cleaned != text:
         logger.info("JD 清洗：%d 字 → %d 字", len(text), len(cleaned))
+    # 清洗前的原文要留底：抽取用清洗后的，但排查"是不是清洗删掉了关键要求"
+    # 必须有对照。这一步必须在 text 被覆盖之前做。
+    original_text = text
     text = cleaned
 
     try:
@@ -185,6 +188,7 @@ async def ingest_job(payload: JobIngestRequest) -> dict:
             conn,
             source=payload.source,
             raw_text=text,
+            raw_text_original=original_text,
             raw_html=payload.raw_html,
             url=payload.url,
             source_job_id=payload.source_job_id,

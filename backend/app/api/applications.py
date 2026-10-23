@@ -17,13 +17,13 @@ from ..db.pool import get_pool
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/applications", tags=["applications"])
 
+# 投递状态只有两个。
+# 原来有六个（候选 / 已投 / 沟通中 / 面试 / Offer / 不合适），实测一次都没被
+# 手动点过 —— 招聘平台自带投递记录且是自动的，手动维护状态是纯负担。
+# 系统真正需要知道的只有"投了没"；"有没有回应"由聊天记录带出来，不靠人填。
 STATUS_LABEL = {
-    "candidate": "候选",
-    "applied": "已投递",
-    "talking": "沟通中",
-    "interview": "面试",
-    "offer": "Offer",
-    "rejected": "不合适",
+    "candidate": "未投",
+    "applied": "已投",
 }
 
 

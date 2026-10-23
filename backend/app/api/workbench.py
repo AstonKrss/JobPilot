@@ -2,10 +2,10 @@
 
 为什么用规则而不是让模型写：
     这个提示要在工作台一打开就出现，模型一次要 10 秒以上（服务商生成速度约 6 tok/s），
-    等它还不如不给。而且判断依据是明确的几个状态位（匹配结论 / 缺口数 /
-    投递状态 / 最后一条消息是谁说的），规则能覆盖绝大多数情况，还免费、可解释。
+    等它还不如不给。而且判断依据是明确的几个事实（匹配结论 / 缺口数 /
+    投了没 / 最后一条消息是谁说的），规则能覆盖绝大多数情况，还免费、可解释。
 
-    模型只在该写"面试怎么准备"这种需要结合岗位细节的地方才有优势，
+    模型真正有优势的是"读 JD 细节去猜面试官会问什么"这类需要理解的任务，
     那属于另一个功能，不该拖慢这里的首屏。
 """
 
@@ -35,7 +35,7 @@ class NextStepRequest(BaseModel):
     # 匹配结论：pass / confirm / reject / none（没跑过匹配）
     match_decision: str = "none"
     missed_skills: list[str] = []
-    # 投递状态：candidate / applied / talking / interview / offer / rejected / none
+    # 投递状态只有两个：candidate（未投）/ applied（已投）。传 none 表示还没有记录
     app_status: str = "none"
     # 最后一条聊天记录是谁说的：HR / 我 / None
     last_role: str | None = None
@@ -76,13 +76,11 @@ async def next_step(payload: NextStepRequest) -> dict:
 
     # 到这里是 pass，按投递进度往下走。
     #
-    # 投递状态只保留两个：未投 / 已投。原来有六个（沟通中 / 面试 / offer /
+    # 投递状态只有两个：未投 / 已投。原来有六个（沟通中 / 面试 / offer /
     # 不合适），实测一次都没被手动点过 —— 手动维护状态是纯负担，而平台自带
-    # 投递记录。现在只需要"投了没"这一个事实，其余信息由聊天记录带出来。
-    # 旧数据里的 talking / interview / offer 一律视为"已投"。
-    applied = status in ("applied", "talking", "interview", "offer")
-
-    if not applied:
+    # 投递记录。现在只需要"投了没"这一个事实，其余由聊天记录带出来。
+    # 旧库里的六态已由 schema.sql 的迁移归并到这两态。
+    if status != "applied":
         if missed:
             top = "、".join(missed[:2])
             return _step(

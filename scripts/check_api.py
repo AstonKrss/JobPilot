@@ -122,9 +122,23 @@ def main() -> int:
 
     # 投递跟踪
     check("GET", "/api/applications", ["count", "items"])
-    check("GET", "/api/applications/stats", ["tracked", "status_counts"])
+    stats = check("GET", "/api/applications/stats", ["tracked", "status_counts"])
     if job_id:
         check("GET", f"/api/applications/by-job/{job_id}", ["exists"])
+
+    # 契约一致性：状态机收敛到「未投 / 已投」之后，接口不该再吐旧东西。
+    # 这类"前端不用了、后端还在返回"的半改状态最容易被追问 ——
+    # 它说明某次重构只做了一半。
+    if stats is not None:
+        if "reply_rate" in stats:
+            bad("stats 不再返回 reply_rate", "样本十几条时比率是噪音，已改为绝对数")
+        else:
+            ok("stats 不再返回 reply_rate")
+        extra = [k for k in (stats.get("status_counts") or {}) if k not in ("candidate", "applied")]
+        if extra:
+            bad("status_counts 只含两态", f"出现旧状态 {extra}")
+        else:
+            ok("status_counts 只含两态")
 
     # 聊天记录、建议、画像、记忆
     if job_id:
