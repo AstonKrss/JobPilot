@@ -184,7 +184,12 @@ function bootContent(html, url) {
     width: 600, height: 400, top: 0, left: 0, right: 600, bottom: 400, x: 0, y: 0,
   });
   w.chrome = {
-    runtime: { id: 'test', getURL: (p) => p, sendMessage: async () => ({ ok: true }), lastError: null },
+    // content.js 现在会注册 scrape-list 监听（供后台定时扫描调用），
+    // mock 少一个 onMessage 就会在注入时直接抛错，整套测试全挂
+    runtime: {
+      id: 'test', getURL: (p) => p, sendMessage: async () => ({ ok: true }),
+      onMessage: { addListener() {} }, lastError: null,
+    },
     storage: { local: { get: async () => ({}), set: async () => ({}) } },
   };
   w.eval(fs.readFileSync(path.join(ROOT, 'extension', 'lib.js'), 'utf8'));

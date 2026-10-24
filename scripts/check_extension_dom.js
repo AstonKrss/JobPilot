@@ -62,7 +62,13 @@ function runOne(htmlPath, pageUrl, expected = null) {
     });
 
     w.chrome = {
-      runtime: { id: 'test', getURL: (p) => p, sendMessage: async () => ({ ok: true }), lastError: null },
+      // content.js 注册了 scrape-list 监听供后台定时扫描调用，
+      // mock 缺 onMessage 会让注入直接抛错 —— 表现为"悬浮球没挂出来"，
+      // 而真实原因跟选择器毫无关系
+      runtime: {
+        id: 'test', getURL: (p) => p, sendMessage: async () => ({ ok: true }),
+        onMessage: { addListener() {} }, lastError: null,
+      },
       storage: { local: { get: async () => ({}), set: async () => ({}) } },
     };
     w.fetch = async () => ({ ok: true, json: async () => ({}) });

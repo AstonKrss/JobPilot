@@ -457,13 +457,15 @@ def create_job(
     url: str | None = None,
     source_job_id: str | None = None,
     detail_level: str = "unknown",
-) -> int:
-    """同源同 ID 已存在则更新原文并返回原 id，避免同一岗位反复入库。
+) -> tuple[int, bool]:
+    """同源同 ID 已存在则更新原文，返回 (id, 是否新增)。
+
+    第二个返回值是给「自动发现新岗位」用的：定时扫描时只有真的新增才该提醒，
+    老岗位被重新抓到不算新岗位 —— 没有这个标记，每 2 小时都会推一遍同样的岗位。
 
     raw_text 存的是**清洗后**的文本（抽取用的是它），raw_text_original 存清洗前。
     两份都留是有代价的（约多一倍字符），但只留一份的代价更大：
-    清洗规则改坏之后，既没法复现也没法回归 —— 这个项目就吃过这个亏，
-    想补一份真实样本时发现库里全是已清洗的文本。
+    清洗规则改坏之后，既没法复现也没法回归。
     """
     if source_job_id:
         row = conn.execute(
@@ -487,7 +489,7 @@ def create_job(
                 """,
                 (raw_text, raw_text_original, raw_html, url, detail_level, row[0]),
             )
-            return int(row[0])
+            return int(row[0]), False
 
     row = conn.execute(
         """
@@ -499,7 +501,7 @@ def create_job(
         (source, source_job_id, url, raw_html, raw_text, raw_text_original, detail_level),
     ).fetchone()
     assert row is not None
-    return int(row[0])
+    return int(row[0]), True
 
 
 def save_job_profile(

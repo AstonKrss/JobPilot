@@ -1189,3 +1189,57 @@ button.danger:hover:not(:disabled) { background: var(--danger-weak); }
   .chat-samples { grid-template-columns: 1fr; }
   .composer-box { border-radius: 16px; }
 }
+
+/* ---------- 岗位横向对比 ---------- */
+
+.cmp-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: var(--primary-weak);
+  border-radius: var(--radius-s);
+  font-size: 13px;
+}
+
+.cmp-check {
+  width: 15px;
+  height: 15px;
+  margin-right: 2px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* 列多时横向滚动，不换行 —— 表头换行会让对比位置错开，反而更难读 */
+.cmp-wrap { overflow-x: auto; }
+
+.cmp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.cmp-table th,
+.cmp-table td {
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.cmp-table thead th {
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cmp-table tbody th {
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+  width: 92px;
+}
+
+.cmp-table td { min-width: 150px; }

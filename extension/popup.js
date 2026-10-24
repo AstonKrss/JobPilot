@@ -78,3 +78,82 @@ document.getElementById('inject').addEventListener('click', async () => {
     setStatus(`注入失败：${e.message}（该页面可能不允许扩展运行）`, 'bad');
   }
 });
+
+
+/* ---------- 自动发现新岗位 ---------- */
+
+const WATCH_KEYS = ['watchUrl', 'watchOn', 'watchLast'];
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getMonth() + 1}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderWatchLast(last) {
+  const node = document.getElementById('watch-last');
+  if (!node) return;
+  if (!last || !last.at) {
+    node.textContent = '还没扫过。';
+    return;
+  }
+  if (last.note) {
+    node.textContent = `上次 ${fmtTime(last.at)}：${last.note}`;
+    return;
+  }
+  node.textContent = `上次 ${fmtTime(last.at)}：抓了 ${last.total || 0} 个，新增 ${last.added || 0} 个`;
+}
+
+async function restoreWatch() {
+  const stored = await chrome.storage.local.get(WATCH_KEYS);
+  document.getElementById('watch').value = stored.watchUrl || '';
+  document.getElementById('watch-on').checked = Boolean(stored.watchOn);
+  renderWatchLast(stored.watchLast);
+}
+
+document.getElementById('watch').addEventListener('change', async (ev) => {
+  await chrome.storage.local.set({ watchUrl: ev.target.value.trim() });
+});
+
+document.getElementById('watch-on').addEventListener('change', async (ev) => {
+  const enabled = ev.target.checked;
+  const url = document.getElementById('watch').value.trim();
+  if (enabled && !url) {
+    ev.target.checked = false;
+    setStatus('先填一个搜索结果页网址，再开启定时扫描', 'bad');
+    return;
+  }
+  await chrome.storage.local.set({ watchUrl: url, watchOn: enabled });
+  chrome.runtime.sendMessage({ type: 'watch-schedule', enabled });
+  setStatus(enabled ? '已开启：每 2 小时扫一次（3 分钟后首次运行）' : '已关闭定时扫描', 'ok');
+});
+
+document.getElementById('watch-run').addEventListener('click', async () => {
+  const url = document.getElementById('watch').value.trim();
+  if (!url) {
+    setStatus('先填一个搜索结果页网址', 'bad');
+    return;
+  }
+  await chrome.storage.local.set({ watchUrl: url });
+  setStatus('正在扫描，大约需要 20-40 秒…');
+  chrome.runtime.sendMessage({ type: 'watch-now' }, (resp) => {
+    if (chrome.runtime.lastError || !resp) {
+      setStatus('扫描没跑起来，检查后端是否在运行', 'bad');
+      return;
+    }
+    const r = (resp.result || {});
+    if (r.skipped) {
+      setStatus('扫描被跳过：先勾上「每 2 小时自动扫一次」', 'bad');
+      return;
+    }
+    if (r.error) {
+      setStatus(`扫描失败：${r.error}`, 'bad');
+      return;
+    }
+    setStatus(`扫描完成：抓了 ${r.total || 0} 个，新增 ${r.added || 0} 个`, 'ok');
+    chrome.storage.local.get('watchLast').then((s) => renderWatchLast(s.watchLast));
+  });
+});
+
+restoreWatch();

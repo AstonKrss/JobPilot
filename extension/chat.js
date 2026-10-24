@@ -12,7 +12,7 @@
   if (globalThis.__jobAgentChatReady) return;
   globalThis.__jobAgentChatReady = true;
 
-  const VERSION = '0.6.2';
+  const VERSION = '0.7.0';
   const API_TIMEOUT = 90000;
   // 聊天框是 SPA 异步渲染的，document_idle 时可能还没出来。
   // 之前是"注入即挂 UI"，换到现在按 URL 全站注入后，必须先等页面长出聊天框

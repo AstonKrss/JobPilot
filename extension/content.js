@@ -1350,6 +1350,22 @@
       .finally(renderActions);
   }
 
+  // 后台定时扫描时给本页发消息，复用同一套抓取逻辑。
+  //
+  // 为什么不让 background 自己注入脚本抓：选择器和去重逻辑全在这里，
+  // 两处各写一份必然走样 —— 平台改版时改了一处忘了另一处，
+  // 表现就是「手动能抓、自动抓不到」，极难排查。
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || message.type !== 'scrape-list') return undefined;
+    try {
+      const list = scrapeList(message.count || 20);
+      sendResponse({ ok: true, items: list.items, unique: list.unique });
+    } catch (err) {
+      sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+    }
+    return true;
+  });
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {

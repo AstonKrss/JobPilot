@@ -184,7 +184,7 @@ async def ingest_job(payload: JobIngestRequest) -> dict:
         raise HTTPException(status_code=422, detail=bad_title)
 
     with get_pool().connection() as conn:
-        job_id = repo.create_job(
+        job_id, is_new = repo.create_job(
             conn,
             source=payload.source,
             raw_text=text,
@@ -205,6 +205,8 @@ async def ingest_job(payload: JobIngestRequest) -> dict:
         "profile_id": profile_id,
         "profile": data,
         "cost_cny": round(result.cost_cny, 4),
+        # 自动发现定时扫描时靠它判断"要不要提醒用户"：老岗位被重新抓到不算新
+        "is_new": is_new,
     }
 
 

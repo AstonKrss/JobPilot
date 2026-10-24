@@ -27,6 +27,10 @@
     font-family: inherit;
   }
   .hint { color: #6b6b66; font-size: 11px; margin: 10px 0 0; }
+  .divider { margin-top: 14px; padding-top: 12px; border-top: 1px solid #e2e1dc; }
+  .row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #2c2c2a; margin: 6px 0 8px; }
+  .row input { width: auto; margin: 0; }
+  button.ghost { background: #fff; color: #185fa5; }
 </style>
 </head>
 <body>
@@ -41,6 +45,15 @@
   <button id="inject" style="background:#fff;color:#185fa5">在当前页显示面板</button>
 
   <p class="hint">打开 Boss/猎聘/智联的岗位页或搜索列表页，右下角会出现「求」按钮。列表页支持批量抓取，但只抓到卡片摘要。</p>
+
+  <div class="divider">
+    <label for="watch">自动发现新岗位</label>
+    <input id="watch" placeholder="粘贴一个搜索结果页网址">
+    <div class="row"><input type="checkbox" id="watch-on"><label for="watch-on" style="margin:0">每 2 小时自动扫一次</label></div>
+    <button id="watch-run" class="ghost">立即扫一次</button>
+    <p class="hint" id="watch-last"></p>
+    <p class="hint">扫描时会短暂打开一个后台标签页（不抢焦点），抓完自动关闭。需要保持登录状态，否则抓到 0 条。</p>
+  </div>
 
   <script src="popup.js"></script>
 </body>

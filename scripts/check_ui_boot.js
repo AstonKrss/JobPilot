@@ -114,8 +114,12 @@ const fullHtml = fs
   // 这块的历史：六态面板一次都没人点过，改成"技能缺口 + 同类岗位"后
   // 最怕的是渲染悄悄退化（面板空了但页面不报错）。所以断言具体内容。
   const mock = (url) => {
-    if (url.includes('/api/jobs/14')) {
-      return { profile: { title: 'Java后端开发实习生', company: '测试公司', city: '深圳', basic: {} }, url: 'https://example.com/14' };
+    if (url.includes('/api/jobs/')) {
+      return {
+        profile: { title: 'Java后端开发实习生', company: '测试公司', city: '深圳', basic: {} },
+        salary: '200-250元/天',
+        url: 'https://example.com/14',
+      };
     }
     if (url.includes('/matches')) {
       return {
@@ -137,6 +141,18 @@ const fullHtml = fs
       };
     }
     if (url.includes('/next-step')) return { action: '补 Kafka 再投', reason: '还差 2 项必备技能', urgency: 'normal' };
+    if (url.includes('/api/advice/search-strategy')) {
+      return {
+        diagnosis: { verdict: '方向偏了，补技能解决不了', reason: '32 个否决里 25 个卡在必备技能' },
+        summary: { total: 45, pass: 3, confirm: 10, reject: 32 },
+        search_terms: [{ term: 'Java 开发工程师', why: '简历核心技能 + 通过岗位的共同方向' }],
+        title_trap: { count: 2, words: ['资深', '高级'], examples: [] },
+        fill_resume: [{ skill: 'Kafka', asked_by: 2, related: [{ name: 'RabbitMQ', similarity: 0.7 }] }],
+        change_direction: [{ skill: '分布式事务', asked_by: 3 }],
+        common_terms: ['开发工程师'],
+        avoid_terms: ['资深'],
+      };
+    }
     return { count: 0, items: [] };
   };
 
@@ -170,6 +186,73 @@ const fullHtml = fs
   }
   if (!wbRender.errors.length) ok('工作台渲染无报错');
   else bad('工作台渲染无报错', wbRender.errors.slice(0, 3).join(' | '));
+
+  // ---------- 5. 搜索策略面板 ----------
+  // 它依赖"刚跑出来的匹配结果"，所以要单独验证渲染不崩、关键内容在
+  try {
+    await wbRender.w.eval('loadAdvice(6)');
+  } catch (e) {
+    wbRender.errors.push('loadAdvice 抛错: ' + e.message);
+  }
+  await sleep(150);
+  const adviceText = (wbRender.w.document.getElementById('advice-box') || {}).textContent || '';
+  const adviceChecks = [
+    ['渲染出「搜索策略」面板', adviceText.includes('搜索策略')],
+    ['显示诊断结论', adviceText.includes('方向偏了')],
+    ['渲染出可复制的搜索词', !!wbRender.w.document.querySelector('[data-copy]')],
+    ['显示「会但没写」分组', adviceText.includes('会但没写')],
+    ['显示「够不着」分组', adviceText.includes('够不着')],
+  ];
+  for (const [name, passed] of adviceChecks) {
+    if (passed) ok(name);
+    else bad(name, '页面内容不符合预期');
+  }
+
+  // ---------- 6. 岗位横向对比 ----------
+  // 勾选 → 对比条出现 → 点对比 → 表格渲染。这条链路上任何一环断了，
+  // 用户看到的都是"勾了没反应"，比报错更难排查
+  const cmpData = {
+    counts: { pass: 2, confirm: 0, reject: 0 },
+    total_jobs: 2,
+    cached: false,
+    items: [
+      { job_id: 14, title: 'Java后端开发实习生', company: 'A 公司', decision: 'pass', score: 70, confidence: 0.8, missed_skills: [], reasons: [] },
+      { job_id: 2, title: '高级后端工程师', company: 'B 公司', decision: 'pass', score: 60, confidence: 0.9, missed_skills: ['Kafka'], reasons: [] },
+    ],
+  };
+  try {
+    wbRender.w.eval(`renderMatches(${JSON.stringify(cmpData)})`);
+  } catch (e) {
+    wbRender.errors.push('renderMatches 抛错: ' + e.message);
+  }
+  await sleep(100);
+  const boxes = [...wbRender.w.document.querySelectorAll('[data-cmp]')];
+  boxes.slice(0, 2).forEach((b) => {
+    b.checked = true;
+    b.dispatchEvent(new wbRender.w.Event('change', { bubbles: true }));
+  });
+  const bar = wbRender.w.document.getElementById('cmp-bar');
+  if (bar && !bar.hidden) ok('勾选后出现对比操作条');
+  else bad('勾选后出现对比操作条', '条未显示');
+
+  const cmpBtn = wbRender.w.document.getElementById('btn-cmp');
+  if (cmpBtn && !cmpBtn.disabled) {
+    cmpBtn.click();
+    await sleep(250);
+    const cmpText = (wbRender.w.document.getElementById('cmp-panel') || {}).textContent || '';
+    const cmpChecks = [
+      ['渲染出对比表格', cmpText.includes('岗位对比')],
+      ['对比表含缺口行', cmpText.includes('缺口技能')],
+      ['对比表含两个岗位标题', cmpText.includes('Java后端开发实习生') && cmpText.includes('高级后端工程师')],
+      ['对比表带出薪资', cmpText.includes('200-250元/天')],
+    ];
+    for (const [name, passed] of cmpChecks) {
+      if (passed) ok(name);
+      else bad(name, '表格内容不符合预期');
+    }
+  } else {
+    bad('选够 2 个后对比按钮可用', '按钮仍禁用');
+  }
 
   console.log(`\n${pass}/${pass + fail} 通过`);
   process.exit(fail ? 1 : 0);

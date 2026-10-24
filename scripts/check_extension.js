@@ -49,6 +49,16 @@ function makeCtx(hostname) {
     chrome: {
       runtime: { id: 'test', getURL: (p) => p, sendMessage: async () => ({ ok: true }), onMessage: { addListener() {} }, lastError: null },
       storage: { local: { get: async () => ({}), set: async () => ({}) } },
+      // background.js 现在还会用到这几个：定时任务、通知、后台标签页。
+      // 不补的话顶层求值会直接抛错 —— 而那种错在浏览器里表现为"扩展装上了但不工作"
+      alarms: {
+        create() {}, clear: async () => {},
+        get: async () => null,
+        onAlarm: { addListener() {} },
+      },
+      notifications: { create() {} },
+      tabs: { create: async () => ({ id: 1 }), remove: async () => {}, get: async () => ({ status: 'complete' }), sendMessage: async () => ({ ok: true }) },
+      scripting: { executeScript: async () => [] },
     },
     console,
     setTimeout, clearTimeout, setInterval, clearInterval,
@@ -128,6 +138,28 @@ eq('不对口岗位只问到岗重点', /最看重哪方面/.test(offDir), true)
 // 未知命中信息时不能瞎判方向，应按原有逻辑走
 const unknown = L.buildGreeting({ title: '后端开发工程师', profile, match: {} });
 eq('无计数信息时走通用话术', /工作经验/.test(unknown), true);
+
+/* ---------- 清单与自动发现 ---------- */
+
+// 这些是"漏了就整块功能静默失效"的项：
+// 少了 alarms 权限，定时任务根本不会触发，而且控制台不报错；
+// 少了 notifications，扫描正常但用户永远收不到提醒。
+const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'extension/manifest.json'), 'utf8'));
+const bg = fs.readFileSync(path.join(ROOT, 'extension/background.js'), 'utf8');
+const content = fs.readFileSync(path.join(ROOT, 'extension/content.js'), 'utf8');
+const popupHtml = fs.readFileSync(path.join(ROOT, 'extension/popup.html'), 'utf8');
+const popupJs = fs.readFileSync(path.join(ROOT, 'extension/popup.js'), 'utf8');
+
+for (const perm of ['alarms', 'notifications', 'tabs']) {
+  eq(`manifest 含 ${perm} 权限`, manifest.permissions.includes(perm), true);
+}
+eq('manifest 声明了图标', Boolean(manifest.icons && manifest.icons['128']), true);
+eq('图标文件存在', fs.existsSync(path.join(ROOT, 'extension', 'icon128.png')), true);
+eq('background 注册了定时任务', /chrome\.alarms\.create/.test(bg), true);
+eq('background 扫描时会建后台标签', bg.includes('active: false'), true);
+eq('content 暴露了抓列表接口', content.includes("'scrape-list'"), true);
+eq('popup 有监控地址输入', popupHtml.includes('id="watch"'), true);
+eq('popup 有扫描开关', popupHtml.includes('id="watch-on"'), true);
 
 console.log(`\n${pass}/${pass + fail} 通过`);
 process.exit(fail ? 1 : 0);

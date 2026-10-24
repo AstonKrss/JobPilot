@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api import (
+    advice,
     workbench,
     memory,
     skills,
@@ -91,6 +92,7 @@ app.include_router(profile.router)
 app.include_router(skills.router)
 app.include_router(memory.router)
 app.include_router(workbench.router)
+app.include_router(advice.router)
 
 # 静态界面必须挂载在所有路由之后：mount("/") 会匹配一切路径，
 # 先挂就会把 /api/* 也吞掉

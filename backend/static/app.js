@@ -11,6 +11,12 @@ const state = {
   jobSource: '',      // '' = 全部平台；否则按 source 过滤
   jobSources: {},     // { boss: 12, liepin: 3, ... }
 
+  // 最近一次匹配结果，供"岗位对比"取字段用。
+  // 不重新请求接口：对比必须和当前列表看到的是同一批数据，否则数字对不上
+  matches: null,
+  // 勾选待对比的岗位 id。用 Set 而不是数组，避免重复添加
+  compare: new Set(),
+
   pollTimer: null,
   // job_id -> { score, decision, detail_level }。为空表示没选简历、按时间排序
   jobScores: {},
@@ -347,6 +353,14 @@ function fillResumeSelects() {
     sel.innerHTML = '<option value="">' + placeholder + '</option>' +
       usable.map((r) => `<option value="${r.id}">#${r.id} ${esc(r.file_name)}</option>`).join('');
     if (prev && usable.some((r) => String(r.id) === prev)) sel.value = prev;
+  }
+
+  // 匹配页默认选主简历：每次进来都要手动挑一份很烦，而"主简历"本来就是这层语义。
+  // 只对匹配页做，建议页/排序控件保持空值（它们的语义是"可选"）。
+  const matchSel = document.getElementById('match-resume');
+  if (matchSel && !matchSel.value && usable.length) {
+    const primary = usable.find((r) => r.is_default) || usable[0];
+    matchSel.value = primary.id;
   }
 }
 
@@ -696,9 +710,96 @@ document.getElementById('btn-ingest').addEventListener('click', async (ev) => {
 
 const DECISION_LABEL = { pass: '通过', confirm: '待确认', reject: '否决' };
 
+/* ---------- 岗位横向对比 ---------- */
+
+// 上限 4 个。不是界面限制，是承认"选太多等于没选" ——
+// 求职者真实的纠结通常在两三个之间，列越宽越难权衡。
+const CMP_MAX = 4;
+
+function updateCmpBar() {
+  const bar = document.getElementById('cmp-bar');
+  if (!bar) return;
+  const n = state.compare.size;
+  bar.hidden = n === 0;
+  const count = document.getElementById('cmp-count');
+  if (count) count.textContent = String(n);
+  const btn = document.getElementById('btn-cmp');
+  if (btn) {
+    btn.disabled = n < 2;
+    btn.textContent = n < 2 ? '至少选 2 个' : `对比这 ${n} 个`;
+  }
+}
+
+async function showCompare() {
+  const panel = document.getElementById('cmp-panel');
+  const items = (state.matches?.items || []).filter((i) => state.compare.has(String(i.job_id)));
+  if (!panel || items.length < 2) return;
+
+  panel.innerHTML = '<div class="panel"><div class="empty">加载中…</div></div>';
+  // 薪资与城市不在匹配结果里（那层只关心决策），要单独取一次
+  const details = await Promise.all(
+    items.map((i) => api(`/api/jobs/${i.job_id}`).catch(() => null)),
+  );
+
+  const col = (fn) => items.map((item, idx) => `<td>${fn(item, idx)}</td>`).join('');
+  const rows = [
+    ['公司', col((i) => esc(i.company || '—'))],
+    [
+      '城市 / 薪资',
+      col((i, idx) => {
+        const d = details[idx] || {};
+        const city = (d.profile && d.profile.city) || '未标注';
+        const salary = d.salary ? ' · ' + d.salary : '';
+        return esc(city) + esc(salary);
+      }),
+    ],
+    [
+      '结论',
+      col((i) => {
+        const cls = i.decision === 'pass' ? 'ok' : i.decision === 'reject' ? 'bad' : 'warn';
+        return `<span class="badge ${cls}">${DECISION_LABEL[i.decision] || i.decision}</span>`;
+      }),
+    ],
+    ['信息完整度', col((i) => (i.confidence != null ? Math.round(i.confidence * 100) + '%' : '—'))],
+    ['参考分', col((i) => (i.score != null ? String(i.score) : esc(i.score_note || '未评分')))],
+    [
+      '缺口技能',
+      col((i) => {
+        const missed = i.missed_skills || [];
+        return missed.length
+          ? `<span class="missed">${esc(missed.join('、'))}</span>`
+          : '<span class="ok-text">无</span>';
+      }),
+    ],
+  ];
+
+  panel.innerHTML = `
+    <div class="panel">
+      <div class="panel-head">
+        <h2>岗位对比</h2>
+        <button class="small" id="btn-cmp-close" style="margin-left:auto">收起</button>
+      </div>
+      <div class="cmp-wrap">
+        <table class="cmp-table">
+          <thead><tr><th>对比项</th>${items
+            .map((i) => `<th>${esc(i.title || '未命名岗位')}</th>`)
+            .join('')}</tr></thead>
+          <tbody>${rows.map(([label, cells]) => `<tr><th>${label}</th>${cells}</tr>`).join('')}</tbody>
+        </table>
+      </div>
+      <p class="hint">缺口一栏逐项列出。如果几列缺的是同一项，说明它是这批岗位的共性门槛。</p>
+    </div>`;
+
+  panel.querySelector('#btn-cmp-close').addEventListener('click', () => {
+    panel.innerHTML = '';
+  });
+}
+
 function renderMatches(data) {
   const box = document.getElementById('match-result');
   const counts = data.counts || {};
+  // 供「岗位对比」取字段用。不重新请求接口 —— 对比必须和列表看到的是同一批数据
+  state.matches = data;
 
   if (!data.items || !data.items.length) {
     box.innerHTML = '<div class="panel"><div class="empty">没有可显示的结果。若开启了「显示被否决」仍为空，可能是岗位库还没有数据。</div></div>';
@@ -718,6 +819,11 @@ function renderMatches(data) {
       <div class="summary-item reject"><div class="n">${counts.reject || 0}</div><div class="t">否决</div></div>
       <div class="summary-item"><div class="n">${data.total_jobs || 0}</div><div class="t">已比对岗位</div></div>
     </div>
+    <div class="cmp-bar" id="cmp-bar" hidden>
+      已选 <b id="cmp-count">0</b> 个岗位
+      <button id="btn-cmp" class="small primary" disabled>至少选 2 个</button>
+      <button id="btn-cmp-clear" class="small">清空</button>
+    </div>
     ${data.cached
       ? `<p class="hint">这组条件的结果来自缓存（${formatWhen(data.cached_at)}算的，${data.elapsed_ms || 0}ms 命中）。
            简历重解析或岗位库有变化会自动重算。
@@ -729,6 +835,9 @@ function renderMatches(data) {
         const cards = items.map((i) => `
               <div class="match-card ${key}">
                 <div class="match-head">
+                  <input type="checkbox" class="cmp-check" data-cmp="${i.job_id}"
+                         ${state.compare.has(String(i.job_id)) ? 'checked' : ''}
+                         title="加入对比（最多 ${CMP_MAX} 个）">
                   <span class="match-title">${esc(i.title || '未命名岗位')}</span>
                   <span class="badge ${key === 'pass' ? 'ok' : key === 'reject' ? 'bad' : 'warn'}">${DECISION_LABEL[key]}</span>
                   ${i.company ? `<span class="item-meta">${esc(i.company)}</span>` : ''}
@@ -784,6 +893,8 @@ function renderMatches(data) {
   // 缓存提示里的「重新匹配」是局部重算，不走顶部按钮，避免整页 loading
   const forceBtn = box.querySelector('#btn-match-force');
   if (forceBtn) forceBtn.addEventListener('click', () => runMatch(true));
+
+  updateCmpBar();
 }
 
 /**
@@ -791,6 +902,37 @@ function renderMatches(data) {
  * 每次重新匹配都会整体重建 innerHTML，逐条绑的话监听会随旧节点一起丢掉。
  * 内容按需拉取 —— 一次匹配可能有几十个岗位，全量塞进首屏响应没意义。
  */
+document.getElementById('match-result').addEventListener('change', (ev) => {
+  const cb = ev.target.closest('[data-cmp]');
+  if (!cb) return;
+  const id = String(cb.dataset.cmp);
+  if (cb.checked) {
+    if (state.compare.size >= CMP_MAX) {
+      cb.checked = false;
+      toast(`最多同时对比 ${CMP_MAX} 个岗位`, true);
+      return;
+    }
+    state.compare.add(id);
+  } else {
+    state.compare.delete(id);
+  }
+  updateCmpBar();
+});
+
+document.getElementById('match-result').addEventListener('click', (ev) => {
+  if (ev.target.closest('#btn-cmp')) {
+    showCompare();
+    return;
+  }
+  if (ev.target.closest('#btn-cmp-clear')) {
+    state.compare.clear();
+    document.querySelectorAll('[data-cmp]').forEach((cb) => { cb.checked = false; });
+    updateCmpBar();
+    const panel = document.getElementById('cmp-panel');
+    if (panel) panel.innerHTML = '';
+  }
+});
+
 document.getElementById('match-result').addEventListener('click', async (ev) => {
   const btn = ev.target.closest('[data-jd]');
   if (!btn) return;
@@ -927,13 +1069,110 @@ async function runMatch(force) {
         : `实算 ${((data.elapsed_ms || 0) / 1000).toFixed(1)}s`;
       setStatus('match-status', `已比对 ${data.total_jobs} 个岗位 · ${how}`, 'done');
       renderMatches(data);
+      loadAdvice(resumeId);
     } catch (e) {
       setStatus('match-status', e.message, 'error');
     }
   });
 }
 
+/* ---------- 搜索策略：把否决模式翻译成「该搜什么」 ---------- */
+
+// 为什么放在匹配页而不是单独一页：
+// 它的全部结论都建立在"刚跑出来的这批结果"上，换个页面看会失去上下文。
+// 没有匹配记录时静默不占屏（接口会返回 409）。
+async function loadAdvice(resumeId) {
+  const box = document.getElementById('advice-box');
+  if (!box) return;
+  if (!resumeId) {
+    box.innerHTML = '';
+    return;
+  }
+  try {
+    const d = await api(`/api/advice/search-strategy?resume_id=${resumeId}`);
+    renderAdvice(box, d);
+  } catch {
+    box.innerHTML = '';
+  }
+}
+
+function renderAdvice(box, d) {
+  const diag = d.diagnosis || {};
+  const terms = d.search_terms || [];
+  const fill = d.fill_resume || [];
+  const miss = d.change_direction || [];
+  const trap = d.title_trap || {};
+  // 「补技能解决不了」是个劝退型结论，用暖色；其余用主色
+  const accent = /解决不了|方向不对/.test(diag.verdict || '') ? 'var(--warn)' : 'var(--primary)';
+
+  box.innerHTML = `
+    <div class="panel" style="border-left:3px solid ${accent}">
+      <div class="panel-head">
+        <h2>搜索策略</h2>
+        <span class="badge warn">${esc(diag.verdict || '')}</span>
+      </div>
+      <p class="hint" style="margin-top:0">${esc(diag.reason || '')}</p>
+
+      ${terms.length ? `
+      <div style="margin-top:14px">
+        <div class="sec-title">建议搜索词（点击复制）</div>
+        <div class="row wrap" style="gap:8px;margin-top:6px">
+          ${terms
+            .map(
+              (t) =>
+                `<button class="small" data-copy="${esc(t.term)}" title="${esc(t.why)}">${esc(t.term)} ⧉</button>`,
+            )
+            .join('')}
+        </div>
+      </div>` : ''}
+
+      ${trap.count ? `
+      <div style="margin-top:14px">
+        <div class="sec-title">要避开的标题词</div>
+        <p class="hint" style="margin:2px 0 0">
+          ${esc((trap.words || []).join(' · '))} —— ${trap.count} 个否决岗位的标题里带这些词
+        </p>
+      </div>` : ''}
+
+      ${fill.length ? `
+      <div style="margin-top:14px">
+        <div class="sec-title">会但没写（改简历就能改善）</div>
+        <ul class="reason-list">${fill
+          .map(
+            (x) =>
+              `<li>${esc(x.skill)}<span class="item-meta"> — 简历里有 ${esc(
+                (x.related || []).map((r) => r.name).join('、'),
+              )}</span></li>`,
+          )
+          .join('')}</ul>
+      </div>` : ''}
+
+      ${miss.length ? `
+      <div style="margin-top:14px">
+        <div class="sec-title">够不着的（补，或避开这类岗位）</div>
+        <ul class="reason-list">${miss.map((x) => `<li>${esc(x.skill)}</li>`).join('')}</ul>
+      </div>` : ''}
+    </div>`;
+
+  box.querySelectorAll('[data-copy]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        toast(`已复制「${btn.dataset.copy}」，去招聘网站搜一下`);
+      } catch {
+        toast('复制失败，请手动选中', true);
+      }
+    });
+  });
+}
+
 document.getElementById('btn-match').addEventListener('click', () => runMatch(false));
+
+// 换简历时同步刷新策略：不同简历的否决模式完全不同，留着上一份的建议会误导
+const matchResumeSel = document.getElementById('match-resume');
+if (matchResumeSel) {
+  matchResumeSel.addEventListener('change', () => loadAdvice(matchResumeSel.value));
+}
 
 /* ---------- 建议 ---------- */
 
@@ -1774,7 +2013,7 @@ async function checkHealth() {
 // 构建标记：页脚显示，用来一眼确认浏览器加载的是不是最新版。
 // 踩过这个坑：改完样式，用户看到的是旧标签页，界面"完全没变化"，
 // 分不清是没生效还是没刷新——有这个标记就不用猜。
-const BUILD_TAG = '2026-10-23b · 工作台改版';
+const BUILD_TAG = '2026-10-24a · 搜索策略';
 const buildTagEl = document.getElementById('build-tag');
 if (buildTagEl) buildTagEl.textContent = BUILD_TAG;
 
