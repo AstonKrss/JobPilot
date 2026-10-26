@@ -47,6 +47,16 @@
   <p class="hint">打开 Boss/猎聘/智联的岗位页或搜索列表页，右下角会出现「求」按钮。列表页支持批量抓取，但只抓到卡片摘要。</p>
 
   <div class="divider">
+    <label for="crawl">批量采集（翻页抓一批）</label>
+    <input id="crawl" placeholder="先在平台搜好，把结果页网址粘这里">
+    <label for="crawl-pages" style="margin-top:2px">翻几页</label>
+    <input id="crawl-pages" type="number" min="1" max="5" value="3">
+    <button id="crawl-run" class="ghost">开始采集</button>
+    <p class="hint" id="crawl-last"></p>
+    <p class="hint">会在后台标签页里翻页抓卡片（只抓摘要，不抓完整 JD），抓完自动关闭。需要保持登录。</p>
+  </div>
+
+  <div class="divider">
     <label for="watch">自动发现新岗位</label>
     <input id="watch" placeholder="粘贴一个搜索结果页网址">
     <div class="row"><input type="checkbox" id="watch-on"><label for="watch-on" style="margin:0">每 2 小时自动扫一次</label></div>

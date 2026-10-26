@@ -193,6 +193,136 @@ async function scanWatchPage(force = false) {
   }
 }
 
+/* ---------- 批量采集（雷达用） ----------
+ *
+ * 输入是"用户自己搜好的一个结果页 URL"，输出是翻了 N 页拿到的一批卡片摘要。
+ * 不做 URL 拼接：平台的搜索参数带一次性签名，硬拼出来的链接经常只是
+ * 重复返回第一页 —— 表现成"抓了一堆重复岗位"，排查方向会被带偏。
+ *
+ * 每页之间靠 DOM 指纹判断翻页是否成功，而不是固定 sleep：
+ * sleep 短了会重复提交同一页，长了整轮采集慢得离谱。
+ */
+
+const CRAWL_MAX_PAGES = 5;
+const CRAWL_PER_PAGE = 30;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function waitForPageChange(tabId, beforeFirst, timeoutMs = 12000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    await sleep(700);
+    const sig = await chrome.tabs.sendMessage(tabId, { type: 'page-signature' }).catch(() => null);
+    if (!sig || !sig.ok) continue;
+    // 首条卡片变了就算翻页成功。有些平台是整页刷新，href 也会变，任一即可
+    if (sig.first && sig.first !== beforeFirst) return true;
+  }
+  return false;
+}
+
+async function crawlSearch(startUrl, pages, onProgress) {
+  const total = Math.max(1, Math.min(Number(pages) || 1, CRAWL_MAX_PAGES));
+  let tabId = null;
+  const seenJobs = new Set();
+  let added = 0;
+  let scanned = 0;
+  let donePages = 0;
+  let note = '';
+
+  try {
+    const tab = await chrome.tabs.create({ url: startUrl, active: false });
+    tabId = tab.id;
+    await waitForComplete(tabId, 30000);
+    const source = guessSource(startUrl);
+
+    for (let page = 1; page <= total; page += 1) {
+      const listing = await chrome.tabs
+        .sendMessage(tabId, { type: 'scrape-list', count: CRAWL_PER_PAGE })
+        .catch(() => null);
+
+      if (!listing || !listing.ok || !(listing.items || []).length) {
+        note = page === 1
+          ? '第一页就没解析出岗位：可能没登录，或平台改版了卡片选择器'
+          : '这一页没有新岗位，提前结束';
+        break;
+      }
+
+      donePages = page;
+      scanned += listing.items.length;
+      let addedThisPage = 0;
+
+      for (const item of listing.items) {
+        const key = item.source_job_id || item.url;
+        // 跨页去重。平台的推荐位会把同一岗位放到第 2、3 页，
+        // 不去重的话一次采集能提交三遍同一份 JD，还会覆盖掉后面的真实新岗位名额
+        if (!key || seenJobs.has(key)) continue;
+        seenJobs.add(key);
+        try {
+          const res = await backendCall('/api/jobs/ingest', 'POST', {
+            source: item.source || source,
+            raw_text: item.raw_text,
+            url: item.url,
+            source_job_id: item.source_job_id,
+            detail_level: 'digest',
+          });
+          if (res && res.is_new) {
+            added += 1;
+            addedThisPage += 1;
+          }
+        } catch {
+          // 单条失败不中断整批：平台字段偶尔缺，跳过即可
+        }
+      }
+
+      if (onProgress) {
+        onProgress({ page, pages: total, added, scanned });
+      }
+
+      // 这一页一条新的都没有，说明已经翻出了重复内容，没必要继续
+      if (addedThisPage === 0 && page > 1) {
+        note = `第 ${page} 页全是已入库岗位，提前结束`;
+        break;
+      }
+
+      if (page === total) break;
+
+      const before = await chrome.tabs
+        .sendMessage(tabId, { type: 'page-signature' })
+        .catch(() => null);
+      const next = await chrome.tabs
+        .sendMessage(tabId, { type: 'goto-next-page' })
+        .catch(() => null);
+      if (!next || !next.ok) {
+        note = (next && next.reason) || '翻页失败，已抓到的部分不受影响';
+        break;
+      }
+      const changed = await waitForPageChange(tabId, before && before.ok ? before.first : '');
+      if (!changed) {
+        note = '点击下一页后页面没有变化，可能被登录墙拦住了';
+        break;
+      }
+    }
+
+    const result = { added, scanned, pages: donePages, total, note };
+    await chrome.storage.local.set({ crawlLast: { at: Date.now(), ...result, url: startUrl } });
+    if (added > 0) {
+      chrome.notifications.create(`crawl-${Date.now()}`, {
+        type: 'basic',
+        iconUrl: 'icon128.png',
+        title: `批量采集：新增 ${added} 个岗位`,
+        message: `翻了 ${donePages} 页，扫描 ${scanned} 条。去「发现」页重新扫描一次雷达`,
+      });
+    }
+    return result;
+  } catch (err) {
+    return { added, scanned, pages: donePages, total, note: String(err) };
+  } finally {
+    if (tabId !== null) chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
 async function scheduleWatch(enabled) {
   await chrome.alarms.clear(WATCH_ALARM);
   if (!enabled) return;
@@ -212,6 +342,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === 'watch-schedule') {
     scheduleWatch(Boolean(message.enabled)).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (message.type === 'crawl-start') {
+    crawlSearch(message.url, message.pages).then((r) => sendResponse({ ok: true, result: r }));
+    return true;
+  }
+  if (message.type === 'crawl-last') {
+    chrome.storage.local.get('crawlLast').then((s) => sendResponse({ ok: true, last: s.crawlLast || null }));
     return true;
   }
   return undefined;

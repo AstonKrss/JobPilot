@@ -1243,3 +1243,171 @@ button.danger:hover:not(:disabled) { background: var(--danger-weak); }
 }
 
 .cmp-table td { min-width: 150px; }
+
+/* ---------- 发现（岗位雷达） ----------
+   信息层次刻意做成三段：结论（一行话）→ 候选池（卡片）→ 该搜什么（行动）。
+   用户在雷达页要的是判断，不是数据 —— 所以结论放在最上面，且允许它说
+   "没有能投的"，而不是用一堆排序好看的卡片盖住这个事实。 */
+
+.verdict-panel {
+  padding: 16px 20px;
+  border-left: 3px solid var(--primary);
+}
+.verdict-panel.warn { border-left-color: var(--warn); }
+.verdict-panel.empty { border-left-color: var(--danger); }
+
+.verdict-text {
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.verdict-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.stat-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  background: #f1f2f5;
+  color: var(--muted);
+}
+.stat-chip b { font-size: 15px; font-weight: 650; }
+.stat-chip.ok { background: var(--ok-weak); color: #1c7a3d; }
+.stat-chip.warn { background: var(--warn-weak); color: #a35f00; }
+.stat-chip.info { background: var(--primary-weak); color: var(--primary-dark); }
+.stat-chip.bad { background: var(--danger-weak); color: #b3261e; }
+
+.verdict-gap {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* 雷达分单独一列，与正文拉开距离：它是排序依据，不是标题的一部分 */
+.radar-num {
+  flex-shrink: 0;
+  width: 52px;
+  text-align: center;
+  padding-top: 2px;
+}
+.radar-num b {
+  display: block;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -.5px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.radar-num span {
+  display: block;
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: -2px;
+}
+.radar-item.blocked { opacity: .62; }
+.radar-item.blocked .radar-num b { color: var(--faint); }
+
+.radar-why {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.why { color: var(--muted); }
+.why.ok { color: #1c7a3d; }
+.why.warn { color: #a35f00; }
+.why.bad { color: #b3261e; }
+.why.plain { color: var(--faint); }
+.match-line { color: var(--primary-dark); }
+.co-note { color: var(--muted); }
+
+/* 公司分档：T0/T1 是好消息，T2 中性，X 是警告。
+   不用红绿两色一刀切 —— 中间档在业务上就是"不确定"，给成中性才不误导 */
+.badge.tier-t0 { background: rgba(52, 199, 89, .16); color: #16713a; }
+.badge.tier-t1 { background: rgba(52, 199, 89, .09); color: #2f7a4a; }
+.badge.tier-t2 { background: #f1f2f5; color: #6b7078; }
+.badge.tier-x { background: var(--danger-weak); color: #b3261e; }
+
+/* ---------- 搜索计划 ---------- */
+.plan-section { margin-top: 16px; }
+.plan-section:first-of-type { margin-top: 8px; }
+.plan-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: .3px;
+  margin-bottom: 8px;
+}
+.plan-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.plan-chip {
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--card);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, transform .1s;
+}
+.plan-chip:hover { background: var(--primary-weak); border-color: var(--primary); }
+.plan-chip:active { transform: scale(.97); }
+
+.plan-companies {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.plan-co {
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: #fbfbfd;
+}
+.co-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--primary-dark);
+  cursor: pointer;
+  text-align: left;
+}
+.co-name:hover { text-decoration: underline; }
+.plan-co-meta {
+  font-size: 11.5px;
+  color: var(--faint);
+  margin-left: 6px;
+}
+.plan-co-why {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 5px;
+  line-height: 1.5;
+}
+
+.plan-tips {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.8;
+}
+.chip-avoid { background: var(--danger-weak); color: #b3261e; }
+
+@media (max-width: 720px) {
+  .radar-num { width: 44px; }
+  .radar-num b { font-size: 18px; }
+  .plan-companies { grid-template-columns: 1fr; }
+}

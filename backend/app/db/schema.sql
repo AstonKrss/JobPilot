@@ -468,3 +468,91 @@ BEGIN
             ADD CONSTRAINT application_status_check CHECK (status IN ('candidate', 'applied'));
     END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- 公司画像（岗位雷达的基石）
+--
+-- 为什么必须有这一层
+--   「美云智数适不适合我」这个判断，四个依据全是公司级的：在佛山、不是互联网
+--   大厂、不卡学历、是美的子公司。而 job_profile 只有岗位级字段，一个都没有。
+--   缺了公司层，系统只能对每个岗位单独猜，而这些事实对同一家公司是共享的。
+--
+--   公司级判断还有一个好处：新岗位进来时不需要任何额外信息就能被评价。
+--   一个从没见过的岗位，只要公司认得出来，就知道该不该推给用户。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS company (
+    id          BIGSERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,                     -- 展示名，保留原文写法
+    -- 归一键：去括号内容、去"有限公司/集团/股份/科技"等通用后缀、统一大小写与全半角。
+    -- 用归一键而不是 name 做唯一约束，才能让"美的集团股份有限公司"与"美的集团"
+    -- 落到同一条记录上，而不是各建一条、各自只有一半的岗位
+    norm_key    TEXT NOT NULL UNIQUE,
+    parent      TEXT,                              -- 母公司/所属集团
+    hq_city     TEXT,
+    industry    TEXT,                              -- 家电 / 制造 / 工业软件 / 互联网 / 金融 …
+    nature      TEXT,                              -- 民企 / 国企 / 外企 / 合资 / 上市 / 事业单位
+    scale       TEXT,                              -- 规模区间原文
+    -- 是否互联网大厂（字节/腾讯/阿里/美团…）。
+    -- 单独成列而不是塞进 tags：它同时影响两件事 —— 竞争烈度与学历卡控，
+    -- 而且是排序里唯一一个"减分"的硬信号，必须能单独取用
+    is_big_tech BOOLEAN NOT NULL DEFAULT FALSE,
+    -- 是否外包/人力供应商。这类公司给简历带来的增值很低，
+    -- 且常以"驻场"形式派到甲方，岗位标题看着像正经岗，实际签约主体不是甲方
+    is_outsourcing BOOLEAN NOT NULL DEFAULT FALSE,
+    -- 有明确校招/实习通道（三态：NULL = 不知道，不当成"没有"）
+    campus_channel BOOLEAN,
+    edu_note    TEXT,                              -- 学历门槛的人工判断依据
+    note        TEXT,                              -- 一句话点评，给用户看的
+    tags        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- 来源分级：seed = 公开信息预置；inferred = 从 JD 学习；user = 用户改过（优先）
+    source      TEXT NOT NULL DEFAULT 'inferred'
+                CHECK (source IN ('seed', 'inferred', 'user')),
+    -- user 来源的字段不允许被自动学习覆盖，这一列记的是"用户改过哪些字段"
+    locked_fields JSONB NOT NULL DEFAULT '[]'::jsonb,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_company_norm ON company (norm_key);
+
+-- 岗位 → 公司。存归一键而不是外键：
+-- ① 公司画像后建，老岗位不需要回填也能先挂上
+-- ② 公司改名/合并时只要改归一键的映射，不用改一排外键
+ALTER TABLE job_profile ADD COLUMN IF NOT EXISTS company_key TEXT;
+CREATE INDEX IF NOT EXISTS idx_job_profile_company ON job_profile (company_key);
+
+-- 届别：JD 里的「2028届」「27届」。
+-- 这是校招场景下用户最先看的一个信号，而原来的抽取完全没碰它 ——
+-- 结果就是"27届管培生"和"2028届校招"在列表里长得一模一样
+ALTER TABLE job_profile ADD COLUMN IF NOT EXISTS graduate_years JSONB NOT NULL DEFAULT '[]'::jsonb;
+-- 校招批次：校招 / 实习 / 社招 / 不限 / NULL（没提）
+ALTER TABLE job_profile ADD COLUMN IF NOT EXISTS campus_type TEXT;
+
+-- ---------------------------------------------------------------------------
+-- 雷达偏好：用户"想去哪、能不能进"的显式设定
+--
+-- 不复用 user_profile 的原因：那张表是对话中被动学习来的，会被后续对话改动，
+-- 而雷达的判定标准必须是稳定的 —— 否则用户随口一句"深圳也行"就会让筛选条件漂移，
+-- 下次打开发现推荐全变了，却不知道为什么。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS radar_pref (
+    id           INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    cities       JSONB NOT NULL DEFAULT '["佛山","广州"]'::jsonb,
+    -- 通勤分档：同城 = 1.0，邻市（广佛） = 0.6，其余 = 0。用分档而不是公里数，
+    -- 因为不引入地图 API 就拿不到坐标，而"广佛同城"是这个用户的主要场景
+    nearby_cities JSONB NOT NULL DEFAULT '["广州"]'::jsonb,
+    graduation_year INT,
+    edu_level    TEXT,
+    -- 现阶段的求职档位：internship = 实习优先 / campus = 校招优先 / both = 都要
+    stage        TEXT NOT NULL DEFAULT 'internship'
+                 CHECK (stage IN ('internship', 'campus', 'both')),
+    accept_outsourcing BOOLEAN NOT NULL DEFAULT FALSE,
+    -- 公司质量的权重。用户要的是"优质岗位"，所以默认高于匹配分
+    weight_company REAL NOT NULL DEFAULT 0.45,
+    weight_match   REAL NOT NULL DEFAULT 0.35,
+    weight_distance REAL NOT NULL DEFAULT 0.20,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO radar_pref (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- 公司法人的其他写法。同一家公司常有多个抬头（美的集团 / 美的 / Midea），
+-- 抽取出来的 company 字段写法不受控，靠别名才能把岗位落到同一条公司记录上
+ALTER TABLE company ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]'::jsonb;

@@ -86,7 +86,7 @@ async function withLoading(btn, label, fn) {
 
 // 视图白名单。新增标签页时必须同步加进来，否则 activateView 会静默返回，
 // 点 tab 没反应、hash 也恢复不了 —— 加「工作台」时就漏了，查了两轮才定位
-const VIEWS = ['resumes', 'jobs', 'match', 'workbench', 'review', 'chat'];
+const VIEWS = ['resumes', 'jobs', 'radar', 'match', 'workbench', 'review', 'chat'];
 
 function activateView(name) {
   if (!VIEWS.includes(name)) return;
@@ -106,6 +106,10 @@ document.querySelectorAll('.tab').forEach((tab) => {
     if (tab.dataset.view === 'workbench') {
       fillWorkbenchSelects();
       loadWorkbenchStats();
+    }
+    if (tab.dataset.view === 'radar') {
+      loadRadar();
+      loadRadarPlan();
     }
   });
 });
@@ -562,6 +566,8 @@ function renderJobs() {
                 ${decide}
                 ${platformBadge(j.source || 'manual')}
                 ${j.job_nature ? `<span class="badge">${esc(j.job_nature)}</span>` : ''}
+                ${(j.graduate_years || []).length
+                  ? `<span class="badge info">${j.graduate_years.join('/')} 届</span>` : ''}
                 ${j.edu_level ? `<span class="badge">${esc(j.edu_level)}</span>` : ''}
                 ${j.city ? `<span class="badge">${esc(j.city)}</span>` : ''}
                 ${j.detail_level === 'full' ? '<span class="badge ok">完整 JD</span>'
@@ -1990,6 +1996,269 @@ document.getElementById('chat-samples').addEventListener('click', (ev) => {
   if (btn) sendChat(btn.dataset.sample);
 });
 
+/* ---------- 发现（岗位雷达） ---------- */
+
+// 公司分档。T0/T1 是"值得优先投入时间"的两档，T2 不是不能去，是需要单独核实，
+// X 是外包/人力供应商 —— 去了简历增值低，所以单独用红色标出来
+const TIER_META = {
+  T0: { cls: 'tier-t0', label: 'T0 首选' },
+  T1: { cls: 'tier-t1', label: 'T1 值得投' },
+  T2: { cls: 'tier-t2', label: 'T2 保底' },
+  X: { cls: 'tier-x', label: 'X 慎投' },
+};
+
+const GRADE_META = {
+  reachable: { cls: 'ok', label: '可达' },
+  stretch: { cls: 'warn', label: '勉强' },
+  unknown: { cls: 'info', label: '待确认' },
+  blocked: { cls: 'bad', label: '已排除' },
+};
+
+const radarState = { data: null, showBlocked: false };
+
+async function loadRadar() {
+  const box = document.getElementById('radar-list');
+  if (!box) return;
+  try {
+    const q = radarState.showBlocked ? '?include_blocked=true&limit=200' : '?limit=80';
+    const data = await api('/api/radar' + q);
+    radarState.data = data;
+    fillRadarPref(data.pref);
+    renderRadarVerdict(data);
+    renderRadarList(data);
+  } catch (err) {
+    box.innerHTML = `<div class="empty">雷达加载失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+function fillRadarPref(pref) {
+  if (!pref) return;
+  document.getElementById('radar-stage').value = pref.stage || 'internship';
+  document.getElementById('radar-cities').value = (pref.cities || []).join(',');
+  document.getElementById('radar-year').value = pref.graduation_year || '';
+  document.getElementById('radar-edu').value = pref.edu_level || '本科';
+  document.getElementById('radar-outsourcing').checked = !!pref.accept_outsourcing;
+}
+
+function renderRadarVerdict(data) {
+  const box = document.getElementById('radar-verdict');
+  if (!box) return;
+  const v = data.verdict || { level: 'ok', text: '' };
+  const counts = data.grade_counts || {};
+  const chip = (n, label, cls) =>
+    `<span class="stat-chip ${cls}"><b>${n}</b>${label}</span>`;
+  const gaps = data.data_gaps || {};
+
+  box.innerHTML = `
+    <div class="panel verdict-panel ${v.level}">
+      <div class="verdict-text">${esc(v.text)}</div>
+      <div class="verdict-stats">
+        ${chip(counts.reachable || 0, '个可达', 'ok')}
+        ${chip(counts.stretch || 0, '个勉强', 'warn')}
+        ${chip(counts.unknown || 0, '个待确认', 'info')}
+        ${chip(counts.blocked || 0, '个已排除', 'bad')}
+      </div>
+      ${gaps.no_company
+        ? `<div class="verdict-gap">其中 ${gaps.no_company} 个岗位没抓到公司名，无法评价公司质量；点开原站详情页重新抓一次就能补上。</div>`
+        : ''}
+    </div>`;
+  document.getElementById('radar-count').textContent =
+    `${data.total_jobs} 个岗位里留下 ${data.returned} 个`;
+}
+
+function renderRadarList(data) {
+  const box = document.getElementById('radar-list');
+  const items = data.items || [];
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">没有一个岗位通过筛选。先看上面的「该搜什么」，换关键词补一批数据。</div>';
+    return;
+  }
+
+  box.innerHTML = items.map((it) => {
+    const g = GRADE_META[it.gate.grade] || GRADE_META.unknown;
+    const tier = TIER_META[it.company_score.tier] || TIER_META.T2;
+    const cp = it.company_profile || {};
+    const companyLine = [
+      it.company || '公司未知',
+      cp.parent ? `${cp.parent}旗下` : '',
+      cp.industry || '',
+      cp.nature || '',
+    ].filter(Boolean).join(' · ');
+
+    const exp = it.exp_min != null
+      ? `${it.exp_min}${it.exp_max != null ? '–' + it.exp_max : '+'} 年`
+      : '';
+    const years = (it.graduate_years || []).length
+      ? `${it.graduate_years.join('/')} 届` : '';
+
+    const why = [
+      ...(it.gate.positives || []).map((t) => `<span class="why ok">✓ ${esc(t)}</span>`),
+      ...(it.gate.cautions || []).map((t) => `<span class="why warn">! ${esc(t)}</span>`),
+      ...(it.gate.blockers || []).map((t) => `<span class="why bad">× ${esc(t)}</span>`),
+    ];
+
+    // 公司加减分理由只取前两条：全列出来会把卡片撑爆，而用户真正需要的
+    // 是"为什么这家公司在这个档位"，两条足够看出主要依据
+    const companyWhy = (it.company_score.reasons || []).slice(0, 2)
+      .map((t) => `<span class="why plain">${esc(t)}</span>`).join('');
+
+    const skills = (it.must_have_skills || []).slice(0, 5)
+      .map((s) => `<span class="chip chip-clip" title="${esc(s)}">${esc(s)}</span>`).join('');
+
+    const m = it.match || {};
+    const matchLine = m.must
+      ? `<span class="match-line">必备技能命中 ${m.hit}/${m.must}${m.reliable ? '' : '（岗位信息不全，仅供参考）'}</span>`
+      : '';
+
+    return `
+      <div class="item radar-item ${it.gate.grade}">
+        <div class="item-row">
+          <div class="radar-num">
+            <b>${Math.round(it.radar_score)}</b>
+            <span>雷达分</span>
+          </div>
+          <div class="item-main">
+            <div class="item-title">
+              <span>${esc(it.title || '（未命名）')}</span>
+              <span class="badge ${g.cls}">${g.label}</span>
+              <span class="badge ${tier.cls}">${tier.label} ${Math.round(it.company_score.score)}</span>
+              ${it.job_nature ? `<span class="badge">${esc(it.job_nature)}</span>` : ''}
+              ${it.city ? `<span class="badge">${esc(it.city)}</span>` : ''}
+              ${it.edu_level ? `<span class="badge">${esc(it.edu_level)}</span>` : ''}
+              ${years ? `<span class="badge info">${esc(years)}</span>` : ''}
+              ${it.salary_raw ? `<span class="badge">${esc(it.salary_raw)}</span>` : ''}
+            </div>
+            <div class="item-meta">
+              ${esc(companyLine)}
+              ${cp.note ? ` · <span class="co-note">${esc(cp.note)}</span>` : ''}
+            </div>
+            <div class="radar-why">
+              ${why.join('')}
+              ${matchLine ? `<span class="why plain">${matchLine}</span>` : ''}
+              ${companyWhy}
+            </div>
+            ${skills ? `<div class="chips" style="margin-top:8px">${skills}</div>` : ''}
+            <div class="item-meta" style="margin-top:6px">
+              #${it.job_id}${it.url ? ` · <a class="jd-link" href="${esc(it.url)}" target="_blank" rel="noreferrer">原站链接 ↗</a>` : ''}
+              ${it.exp_min != null ? ` · 经验 ${esc(exp)}` : ''}
+            </div>
+          </div>
+          <div class="item-actions">
+            <button class="small" data-workbench="${it.job_id}">工作台</button>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function loadRadarPlan() {
+  const box = document.getElementById('radar-plan-body');
+  if (!box) return;
+  try {
+    const p = await api('/api/radar/plan');
+    renderRadarPlan(box, p);
+  } catch (err) {
+    box.innerHTML = `<div class="empty">搜索计划加载失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+function renderRadarPlan(box, p) {
+  document.getElementById('radar-plan-stage').textContent = {
+    internship: '实习优先',
+    campus: '校招优先',
+    both: '实习 + 校招',
+  }[p.stage] || p.stage;
+
+  const kws = (p.keywords || []).map((k) => `
+    <button class="plan-chip" data-copy="${esc(k.q)}" title="${esc(k.why)}">
+      ${esc(k.q)}
+    </button>`).join('');
+
+  const cos = (p.company_targets || []).map((c) => {
+    const tier = TIER_META[c.tier] || TIER_META.T2;
+    return `
+      <div class="plan-co">
+        <button class="co-name" data-copy="${esc(c.company)}">${esc(c.company)}</button>
+        <span class="badge ${tier.cls}">${tier.label}</span>
+        <span class="plan-co-meta">${esc(c.city || '')}${c.in_library ? ` · 库里 ${c.in_library} 条` : ' · 库里没有'}</span>
+        <div class="plan-co-why">${esc(c.why)}</div>
+      </div>`;
+  }).join('');
+
+  const f = p.filters || {};
+  box.innerHTML = `
+    <p class="hint" style="margin-top:0">点关键词或公司名复制，粘到招聘网站的搜索框。给的是词，不是链接 —— 平台的搜索参数一改版，拼好的链接会静默抓空。</p>
+    <p class="hint">搜出结果后，把那个结果页的网址粘到扩展弹窗的「批量采集」里，它会翻几页把卡片抓进来（只抓摘要）。抓完回到这里点「重新扫描」，候选池会重排。</p>
+    <div class="plan-section">
+      <div class="plan-label">关键词</div>
+      <div class="plan-chips">${kws || '<span class="hint">没有可用关键词</span>'}</div>
+    </div>
+    <div class="plan-section">
+      <div class="plan-label">筛选条件</div>
+      <div class="chips">
+        <span class="chip">学历 ${esc(f.degree || '')}</span>
+        <span class="chip">经验 ${esc(f.experience || '')}</span>
+        ${f.graduate_year ? `<span class="chip">${f.graduate_year} 届</span>` : ''}
+        ${(f.avoid || []).map((a) => `<span class="chip chip-avoid">避开：${esc(a)}</span>`).join('')}
+      </div>
+    </div>
+    <div class="plan-section">
+      <div class="plan-label">按公司直搜（命中率最高）</div>
+      <div class="plan-companies">${cos || '<span class="hint">还没有可推荐的公司</span>'}</div>
+    </div>
+    <div class="plan-section">
+      <div class="plan-label">操作要点</div>
+      <ul class="plan-tips">${(p.tips || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+    </div>`;
+}
+
+async function saveRadarPref() {
+  const btn = document.getElementById('btn-radar-save');
+  const cities = document.getElementById('radar-cities').value
+    .split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+  const year = Number(document.getElementById('radar-year').value) || null;
+  const payload = {
+    stage: document.getElementById('radar-stage').value,
+    cities,
+    graduation_year: year,
+    edu_level: document.getElementById('radar-edu').value,
+    accept_outsourcing: document.getElementById('radar-outsourcing').checked,
+  };
+  await withLoading(btn, '保存中…', async () => {
+    await api('/api/radar/pref', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    setStatus('radar-status', '口径已更新', 'done');
+    await loadRadar();
+    await loadRadarPlan();
+  });
+}
+
+document.addEventListener('click', (ev) => {
+  const copyBtn = ev.target.closest('[data-copy]');
+  if (!copyBtn) return;
+  const text = copyBtn.dataset.copy;
+  navigator.clipboard?.writeText(text).then(
+    () => toast(`已复制「${text}」，粘到招聘网站搜索框`),
+    () => toast('复制失败，手动选中复制即可', true),
+  );
+});
+
+const radarShowBlocked = document.getElementById('radar-show-blocked');
+if (radarShowBlocked) {
+  radarShowBlocked.addEventListener('change', (ev) => {
+    radarState.showBlocked = ev.currentTarget.checked;
+    loadRadar();
+  });
+}
+document.getElementById('btn-radar-save')?.addEventListener('click', saveRadarPref);
+document.getElementById('btn-radar-refresh')?.addEventListener('click', () => {
+  setStatus('radar-status', '');
+  loadRadar();
+});
+
 async function checkHealth() {
   const node = document.getElementById('health');
   try {
@@ -2013,7 +2282,7 @@ async function checkHealth() {
 // 构建标记：页脚显示，用来一眼确认浏览器加载的是不是最新版。
 // 踩过这个坑：改完样式，用户看到的是旧标签页，界面"完全没变化"，
 // 分不清是没生效还是没刷新——有这个标记就不用猜。
-const BUILD_TAG = '2026-10-24a · 搜索策略';
+const BUILD_TAG = '2026-10-24b · 岗位雷达';
 const buildTagEl = document.getElementById('build-tag');
 if (buildTagEl) buildTagEl.textContent = BUILD_TAG;
 
@@ -2048,6 +2317,10 @@ checkHealth();
 // 而且控制台没有任何提示，完全查不出来。
 const initialView = (location.hash || '').replace('#', '');
 if (initialView) activateView(initialView);
+if (initialView === 'radar') {
+  loadRadar();
+  loadRadarPlan();
+}
 
 loadResumes().then(fillWorkbenchSelects).catch(() => {});
 loadJobs()

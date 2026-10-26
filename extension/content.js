@@ -416,6 +416,76 @@
     return { kind: 'list', found: nodes.length, unique: items.length, items };
   }
 
+  // ---------- 翻页（雷达的批量采集用） ----------
+  //
+  // 为什么靠点按钮而不是拼 URL
+  //   各平台的分页参数（page / currentPage / offset）不一样，还可能带一次性签名。
+  //   硬拼 URL 的成功率随时间下降，而且失败时表现为"抓到重复的首页"，
+  //   看起来像去重坏了，实际是请求根本没翻页。
+  //
+  // 选择器按"语义"排优先级：aria-label / 文本 > 常见组件库类名 > 泛化的 next 类名。
+  // 泛化类名放最后，因为它最容易误命中（比如"next-step 引导"）。
+  const NEXT_SELECTORS = [
+    'a[aria-label="下一页"]',
+    'button[aria-label="下一页"]',
+    '.ant-pagination-next',
+    '.pager-next a',
+    'li[class*="next"] a',
+    'a[class*="next-page"]',
+    'a[title="下一页"]',
+    '[class*="pagination"] [class*="next"]',
+  ];
+
+  function isDisabled(el) {
+    if (!el) return true;
+    if (el.disabled) return true;
+    if (String(el.getAttribute('aria-disabled')) === 'true') return true;
+    const cls = String(el.className || '');
+    return /disabled|is-disabled/.test(cls);
+  }
+
+  function findNextPage() {
+    for (const sel of NEXT_SELECTORS) {
+      const el = document.querySelector(sel);
+      if (el && !isDisabled(el)) return el;
+    }
+    // 文本兜底：只认完全等于「下一页」的，避免命中「下一页：Java 工程师」这种标题
+    const candidates = document.querySelectorAll('a, button, span[role="button"]');
+    for (const el of candidates) {
+      const text = (el.textContent || '').trim();
+      if ((text === '下一页' || text === 'Next' || text === '下页') && !isDisabled(el)) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  /** 当前页的指纹：首页卡片的链接。翻页成功后它一定会变。 */
+  function pageSignature() {
+    const { nodes } = collectCards();
+    let first = '';
+    for (const node of nodes) {
+      const link = node.querySelector(CARD_LINK);
+      if (link && link.href) {
+        first = link.href;
+        break;
+      }
+    }
+    return { href: location.href, first, count: nodes.length };
+  }
+
+  function clickNextPage() {
+    const el = findNextPage();
+    if (!el) return { ok: false, reason: '没有找到「下一页」按钮，可能已到最后一页' };
+    try {
+      el.scrollIntoView({ block: 'center' });
+    } catch {
+      /* 个别元素不支持 scrollIntoView，不影响点击 */
+    }
+    el.click();
+    return { ok: true };
+  }
+
   // ---------- 后端调用 ----------
 
   // 扩展被重新加载（改代码后点刷新）之后，已经打开的页面里留着的是旧脚本，
@@ -1356,14 +1426,33 @@
   // 两处各写一份必然走样 —— 平台改版时改了一处忘了另一处，
   // 表现就是「手动能抓、自动抓不到」，极难排查。
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (!message || message.type !== 'scrape-list') return undefined;
-    try {
-      const list = scrapeList(message.count || 20);
-      sendResponse({ ok: true, items: list.items, unique: list.unique });
-    } catch (err) {
-      sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+    if (!message) return undefined;
+    if (message.type === 'scrape-list') {
+      try {
+        const list = scrapeList(message.count || 20);
+        sendResponse({ ok: true, items: list.items, unique: list.unique });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+      }
+      return true;
     }
-    return true;
+    if (message.type === 'page-signature') {
+      try {
+        sendResponse({ ok: true, ...pageSignature() });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+      }
+      return true;
+    }
+    if (message.type === 'goto-next-page') {
+      try {
+        sendResponse(clickNextPage());
+      } catch (err) {
+        sendResponse({ ok: false, reason: String(err && err.message ? err.message : err) });
+      }
+      return true;
+    }
+    return undefined;
   });
 
   if (document.readyState === 'loading') {

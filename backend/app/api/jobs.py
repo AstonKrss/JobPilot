@@ -66,7 +66,13 @@ JD_SYSTEM_PROMPT = """你是招聘 JD 信息抽取引擎。从 JD 原文中抽�
    nice_to_have_skills —— 加分项：原文含「优先/加分/更佳/了解/有…经验者优先」的技能。
    「熟悉」按硬性要求处理；「了解」按加分项处理。
    技能名保留原文措辞（如「Go 或 Java」原样保留，不要自行拆分或改写）。
-8. 只输出 JSON 对象，不要任何解释文字或 Markdown 代码块。"""
+8. 只输出 JSON 对象，不要任何解释文字或 Markdown 代码块。
+9. graduate_years：原文出现「2028届」「28届」「2028 年毕业」「2027-2028 届」等写法时，
+   抽出四位年份数组，如 [2028] 或 [2027, 2028]；没提填 []。
+   禁止根据「应届生」三个字反推年份 —— 应届是哪一年要用户自己判断。
+10. campus_type 只能是：校招 / 实习 / 社招 / 不限 / null。
+    「校园招聘」「应届生招聘」「提前批」→ 校招；「实习生」「日常实习」→ 实习；
+    「社会招聘」「要求 N 年经验」→ 社招；「应届与社招均可」→ 不限；没提 → null。"""
 
 JD_USER_TEMPLATE = """JD 原文：
 
@@ -85,6 +91,8 @@ JD_USER_TEMPLATE = """JD 原文：
   "edu_fulltime_required": true|false|null,
   "exp_min": 3,
   "exp_max": 5,
+  "graduate_years": [2028],
+  "campus_type": "校招|实习|社招|不限|null",
   "must_have_skills": ["硬性技能要求，逐条，保留原文措辞"],
   "nice_to_have_skills": ["加分技能，逐条"],
   "description": "岗位职责与要求的要点摘要，不超过 300 字",
@@ -109,6 +117,10 @@ class JobExtract(BaseModel):
     edu_fulltime_required: bool | None = None
     exp_min: int | None = None
     exp_max: int | None = None
+    # 届别与校招批次。校招场景下这两个字段是用户最先看的信号，
+    # 而原来的抽取完全没碰它们，导致「27届管培生」和「28届校招」在列表里长得一样
+    graduate_years: list[int] = Field(default_factory=list)
+    campus_type: str | None = None
     must_have_skills: list[str] = Field(default_factory=list)
     nice_to_have_skills: list[str] = Field(default_factory=list)
     description: str | None = None

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>求职助手</title>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="./style.css?v=20261024a">
+<link rel="stylesheet" href="./style.css?v=20261024b">
 </head>
 <body>
 
@@ -22,6 +22,7 @@
     <nav class="tabs">
       <button class="tab active" data-view="resumes">简历</button>
       <button class="tab" data-view="jobs">岗位</button>
+      <button class="tab" data-view="radar">发现</button>
       <button class="tab" data-view="match">匹配</button>
       <button class="tab" data-view="workbench">工作台</button>
       <button class="tab" data-view="review">建议</button>
@@ -104,6 +105,74 @@
         </div>
         <div class="platform-bar" id="platform-bar"></div>
         <div class="list" id="job-list"></div>
+      </div>
+    </section>
+
+    <!-- 发现：先判断进不进得去，再谈值不值得去 -->
+    <section class="view" id="view-radar">
+      <header class="page-head">
+        <h1>发现</h1>
+        <p>先按届别、学历、经验、通勤把你进不去的岗位整批摘掉，再在公司质量、技能匹配、距离三轴上排。所以这里第一批结果通常很少 —— 那说明的是采集方向，不是筛选坏了。</p>
+      </header>
+
+      <div id="radar-verdict"></div>
+
+      <div class="panel" id="radar-plan-panel">
+        <div class="panel-head">
+          <h2>该搜什么</h2>
+          <span class="count" id="radar-plan-stage"></span>
+        </div>
+        <div id="radar-plan-body"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>候选池</h2>
+          <span class="count" id="radar-count"></span>
+          <label class="check" style="margin-left:auto">
+            <input type="checkbox" id="radar-show-blocked"> 显示已排除
+          </label>
+        </div>
+        <div class="list" id="radar-list"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>筛选口径</h2>
+          <span class="count">改完点保存，候选池立刻重排</span>
+        </div>
+        <div class="form-block">
+          <span class="form-label">档位</span>
+          <div class="form-controls">
+            <label class="field">求职阶段
+              <select id="radar-stage">
+                <option value="internship">实习优先</option>
+                <option value="campus">校招优先</option>
+                <option value="both">两者都要</option>
+              </select>
+            </label>
+            <label class="field">城市
+              <input id="radar-cities" size="18" placeholder="佛山,广州">
+            </label>
+            <label class="field">届别
+              <input id="radar-year" type="number" size="8" placeholder="2028">
+            </label>
+            <label class="field">学历
+              <select id="radar-edu">
+                <option value="本科">本科</option>
+                <option value="大专">大专</option>
+                <option value="硕士">硕士</option>
+              </select>
+            </label>
+            <label class="check"><input type="checkbox" id="radar-outsourcing"> 接受外包</label>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button id="btn-radar-save" class="primary">保存口径</button>
+          <button id="btn-radar-refresh">重新扫描</button>
+          <span class="hint" style="margin:0">届别与学历留空时自动取主简历的值。</span>
+        </div>
+        <p class="status" id="radar-status"></p>
       </div>
     </section>
 
@@ -241,6 +310,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="./app.js?v=20261024a"></script>
+<script src="./app.js?v=20261024b"></script>
 </body>
 </html>

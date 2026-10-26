@@ -13,6 +13,7 @@ from pathlib import Path
 import psycopg
 
 from ..ingest.layout import Block
+from ..radar.company import company_key as company_key_of
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +402,8 @@ def list_jobs(
     sql = """
         SELECT j.id, j.source, j.url, p.title, p.company, p.city, p.job_nature,
                p.edu_level, p.exp_min, p.exp_max, p.must_have_skills,
-               p.nice_to_have_skills, j.created_at, j.detail_level
+               p.nice_to_have_skills, j.created_at, j.detail_level,
+               p.graduate_years
           FROM job j
           LEFT JOIN job_profile p ON p.job_id = j.id AND p.is_current
     """
@@ -433,6 +435,7 @@ def list_jobs(
             "nice_to_have_skills": r[11] or [],
             "created_at": r[12].isoformat() if r[12] else None,
             "detail_level": r[13] or "unknown",
+            "graduate_years": r[14] or [],
             "has_profile": r[3] is not None,
         }
         for r in rows
@@ -512,13 +515,25 @@ def save_job_profile(
     )
     must = profile.get("must_have_skills", []) or []
     nice = profile.get("nice_to_have_skills", []) or []
+    # 届别可能是字符串（"2028届"），统一成 int 再存。抽错的脏值直接丢掉 ——
+    # 一个 "2028届" 里混进年份 2082 会让筛选结果莫名其妙
+    years: list[int] = []
+    for raw in profile.get("graduate_years") or []:
+        try:
+            year = int(str(raw).strip().rstrip("届"))
+        except (TypeError, ValueError):
+            continue
+        if 2000 <= year <= 2100 and year not in years:
+            years.append(year)
+    company_key = company_key_of(profile.get("company"))
     row = conn.execute(
         """
         INSERT INTO job_profile
             (job_id, extract_version, is_current, title, company, city, salary_raw, job_nature,
              edu_level, edu_fulltime_required, exp_min, exp_max, skills, description,
-             hard_constraint_evidence, must_have_skills, nice_to_have_skills, raw_extract)
-        VALUES (%s, %s, TRUE, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             hard_constraint_evidence, must_have_skills, nice_to_have_skills, raw_extract,
+             company_key, graduate_years, campus_type)
+        VALUES (%s, %s, TRUE, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -541,6 +556,9 @@ def save_job_profile(
             psycopg.types.json.Jsonb(must),
             psycopg.types.json.Jsonb(nice),
             psycopg.types.json.Jsonb(profile),
+            company_key,
+            psycopg.types.json.Jsonb(years),
+            profile.get("campus_type"),
         ),
     ).fetchone()
     assert row is not None

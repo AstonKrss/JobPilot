@@ -157,3 +157,52 @@ document.getElementById('watch-run').addEventListener('click', async () => {
 });
 
 restoreWatch();
+
+/* ---------- 批量采集 ----------
+   放在弹窗而不是网页 UI 里：网页在 127.0.0.1，不在扩展的内容脚本注入范围内，
+   网页想直接驱动扩展需要 externally_connectable + 手填扩展 ID，多一步就多一个
+   劝退点。弹窗本来就在浏览器里，天然能发消息给 background。 */
+const crawlInput = document.getElementById('crawl');
+const crawlPages = document.getElementById('crawl-pages');
+const crawlBtn = document.getElementById('crawl-run');
+const crawlLast = document.getElementById('crawl-last');
+
+function renderCrawlLast(last) {
+  if (!last) return;
+  const when = new Date(last.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  const line = `${when} · 翻 ${last.pages || 0}/${last.total || 0} 页 · 扫描 ${last.scanned || 0} 条 · 新增 ${last.added || 0} 个`;
+  crawlLast.textContent = last.note ? `${line}\n${last.note}` : line;
+  crawlLast.style.whiteSpace = 'pre-line';
+}
+
+if (crawlInput && crawlBtn) {
+  chrome.storage.local.get(['crawlUrl', 'crawlPages', 'crawlLast']).then((s) => {
+    if (s.crawlUrl) crawlInput.value = s.crawlUrl;
+    if (s.crawlPages) crawlPages.value = s.crawlPages;
+    renderCrawlLast(s.crawlLast);
+  });
+
+  crawlBtn.addEventListener('click', async () => {
+    const url = crawlInput.value.trim();
+    if (!url) {
+      crawlLast.textContent = '先粘一个搜索结果页的网址';
+      return;
+    }
+    await chrome.storage.local.set({ crawlUrl: url, crawlPages: crawlPages.value });
+    crawlBtn.disabled = true;
+    crawlBtn.textContent = '采集中…';
+    crawlLast.textContent = '正在后台标签页里翻页，窗口会自己关掉，不要手动关它';
+    chrome.runtime.sendMessage(
+      { type: 'crawl-start', url, pages: Number(crawlPages.value) || 1 },
+      (resp) => {
+        crawlBtn.disabled = false;
+        crawlBtn.textContent = '开始采集';
+        if (chrome.runtime.lastError || !resp || !resp.ok) {
+          crawlLast.textContent = '采集失败：' + (chrome.runtime.lastError?.message || '后台无响应');
+          return;
+        }
+        renderCrawlLast({ ...resp.result, at: Date.now() });
+      },
+    );
+  });
+}
