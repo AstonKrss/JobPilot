@@ -707,6 +707,7 @@
           box-shadow: 0 6px 18px rgba(80, 70, 200, .32);
           transition: transform .16s ease, box-shadow .16s ease;
         }
+        .toggle img, .toggle svg { display: block; width: 100%; height: 100%; }
         .toggle:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(80, 70, 200, .38); }
         .toggle:active { transform: translateY(0); }
         .panel {
@@ -766,7 +767,8 @@
         <div id="result"></div>
       </div>
       <button class="toggle" id="toggle" title="小新求职 · 点开看这个岗位能不能投">
-        <svg viewBox="0 0 52 52" width="52" height="52" aria-hidden="true">
+        <img id="toggle-img" alt="" width="52" height="52">
+        <svg id="toggle-fallback" viewBox="0 0 52 52" width="52" height="52" aria-hidden="true" hidden>
           <defs>
             <linearGradient id="gpBrand" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0" stop-color="#635BFF"/>
@@ -786,8 +788,6 @@
           <rect x="29.4" y="24.6" width="6" height="2.4" rx="1.2" fill="#1a1826"/>
           <circle cx="21.6" cy="29.6" r="2" fill="#1a1826"/>
           <circle cx="30.4" cy="29.6" r="2" fill="#1a1826"/>
-          <circle cx="21.1" cy="28.9" r="0.7" fill="#fff"/>
-          <circle cx="29.9" cy="28.9" r="0.7" fill="#fff"/>
           <path d="M22.4 31.6q3.6 2.6 7.2 0" stroke="#1a1826" stroke-width="1.5" fill="none" stroke-linecap="round"/>
         </svg>
       </button>
@@ -805,6 +805,23 @@
     shadow.getElementById('toggle').addEventListener('click', () => {
       ui.panel.classList.toggle('show');
     });
+
+    // 悬浮球用图标原图（而不是手写的 SVG 近似）：扩展资源要在 manifest 里
+    // 声明 web_accessible_resources，页面上下文才加载得到。
+    // 个别站点 CSP 很严，会把它拦掉 —— 那时退回一张内联矢量图，
+    // 至少不会变成一个空白圆球
+    const toggleImg = shadow.getElementById('toggle-img');
+    const toggleFallback = shadow.getElementById('toggle-fallback');
+    if (toggleImg && chrome.runtime && chrome.runtime.id) {
+      toggleImg.addEventListener('error', () => {
+        toggleImg.hidden = true;
+        if (toggleFallback) toggleFallback.hidden = false;
+      }, { once: true });
+      toggleImg.src = chrome.runtime.getURL('icon128.png');
+    } else if (toggleImg && toggleFallback) {
+      toggleImg.hidden = true;
+      toggleFallback.hidden = false;
+    }
     shadow.getElementById('close').addEventListener('click', () => {
       ui.panel.classList.remove('show');
     });

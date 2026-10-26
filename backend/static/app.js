@@ -2287,8 +2287,8 @@ async function checkHealth() {
 // 之前把「2026-10-26a · 一键发现 + 消息监控」整行铺在侧栏底部，
 // 看起来像调试输出漏到了界面上；但它确实有用 ——
 // 改完样式后分不清"没生效"和"没刷新"时，靠它一眼确认。
-const APP_VERSION = 'v0.12.0';
-const BUILD_TAG = '2026-10-26c · 小新求职';
+const APP_VERSION = 'v0.13.0';
+const BUILD_TAG = '2026-10-26d · 小新立绘图标';
 const buildTagEl = document.getElementById('build-tag');
 if (buildTagEl) {
   buildTagEl.textContent = `${APP_VERSION} · 本地`;

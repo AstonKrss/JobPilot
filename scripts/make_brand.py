@@ -1,15 +1,19 @@
 """生成品牌图标（扩展图标 + 网页 logo）。
 
-为什么用脚本画而不是丢一张设计稿进来
-    图标会在 5 个尺寸上出现（16 / 32 / 48 / 128 / 256），手绘一次再逐尺寸导出，
-    小尺寸必然糊。这里用 4 倍超采样 + LANCZOS 缩放，每个尺寸都是独立渲染的；
-    而且改配色只改一个常量，不用回去翻设计软件。
+素材
+    assets/brand/shinchan.png —— 小新立绘（用户提供的素材）。
+    原图已经抠好透明底，但人物是**紧裁**的：头发顶到上边缘、手脚贴着左右下边缘，
+    所以合成时必须自己留出内边距，否则放大之后人会顶满整个方块。
 
-形象
-    「小新求职」—— 红衣黄裤、粗眉圆脸、额头露出来的短发小孩。
-    角色形象属于《蜡笔小新》（原作 臼井仪人 / 版权 双叶社），
-    本项目按用户要求做个人本地使用，不做商业分发、不对外提供服务。
-    如果要公开发布或商用，这个图标必须换掉 —— 角色形象受版权保护。
+为什么用脚本而不是丢五张图进来
+    图标要出 16 / 32 / 48 / 128 / 256 五个尺寸。手工导出五遍，改一次素材就要
+    重来五遍；脚本是 4 倍超采样、每个尺寸独立合成，小尺寸还会自动换成头像特写
+    （全身像在 16px 下只剩一团色块）。
+
+版权
+    角色形象属于《蜡笔小新》（原作 臼井仪人 / 版权 双叶社）。
+    本项目按用户要求做个人本地使用，不商业分发、不对外提供服务。
+    要公开发布或商用，这个素材必须换掉。
 
 用法：python scripts/make_brand.py
 """
@@ -24,14 +28,12 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 EXT = ROOT / "extension"
 STATIC = ROOT / "backend" / "static"
+SRC = ROOT / "assets" / "brand" / "shinchan.png"
 
-# 配色取自角色本身：红衣 + 黄裤，压在冷色底板上对比最强，小尺寸也能一眼认出
+# 底板沿用品牌靛蓝渐变：人物是红黄暖色，压在冷底上对比最强，
+# 小尺寸也能一眼看出是人而不是一块色斑
 BG_FROM = (99, 91, 255)
 BG_TO = (56, 189, 248)
-SKIN = (255, 219, 189)
-HAIR = (26, 24, 38)
-SHIRT = (226, 58, 52)
-BLUSH = (255, 148, 148)
 
 SS = 4  # 超采样倍数
 
@@ -47,118 +49,52 @@ def _gradient(size: int) -> Image.Image:
     return Image.fromarray(arr, "RGBA")
 
 
+def _rounded_mask(size: int, radius: int) -> Image.Image:
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, size - 1, size - 1], radius=radius, fill=255)
+    return mask
+
+
+def _load_figure() -> Image.Image:
+    if not SRC.exists():
+        raise SystemExit(f"找不到素材：{SRC.relative_to(ROOT)}")
+    return Image.open(SRC).convert("RGBA")
+
+
+def _head_crop(fig: Image.Image) -> Image.Image:
+    """裁出头像。小尺寸只用脸，全身像在 16px 下会糊成一团色块。
+
+    横向中心取 0.56 而不是 0.5：原图左手举在左侧，人物的头其实偏右，
+    按正中裁会把脸切掉一半。
+    """
+    w, h = fig.size
+    side = int(min(h * 0.62, w))
+    cx = int(w * 0.56)
+    left = max(0, min(w - side, cx - side // 2))
+    return fig.crop((left, 0, left + side, side))
+
+
 def draw_icon(size: int, compact: bool = False) -> Image.Image:
-    """画一张 size×size 的图标。compact=True 时只画头（小尺寸用）。"""
+    """合成一张 size×size 图标。compact=True 时用头像特写（16/32 用）。"""
     s = size * SS
-    radius = int(s * 0.22)
+    mask = _rounded_mask(s, int(s * 0.22))
 
-    mask = Image.new("L", (s, s), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, s - 1, s - 1], radius=radius, fill=255)
-    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    img.paste(_gradient(s), (0, 0), mask)
-    d = ImageDraw.Draw(img, "RGBA")
+    base = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    base.paste(_gradient(s), (0, 0), mask)
 
-    # 背景雷达弧：暗示"盯着"，同时给小尺寸一点纹理
-    for r, alpha in ((0.86, 24), (0.66, 28), (0.46, 32)):
-        box = [int(s * (0.5 - r / 2)), int(s * (0.5 - r / 2)),
-               int(s * (0.5 + r / 2)), int(s * (0.5 + r / 2))]
-        d.arc(box, start=200, end=340, fill=(255, 255, 255, alpha), width=max(2, int(s * 0.012)))
+    fig = _head_crop(_load_figure()) if compact else _load_figure()
+    # 内边距：留 6%（头像）/ 9%（全身），否则人会顶满方块、贴着圆角
+    box = s * (0.88 if not compact else 0.94)
+    scale = min(box / fig.width, box / fig.height)
+    fw, fh = max(1, int(fig.width * scale)), max(1, int(fig.height * scale))
+    fig = fig.resize((fw, fh), Image.LANCZOS)
 
-    if compact:
-        cx, cy = s * 0.50, s * 0.50
-        R = s * 0.33
-        body_top = s * 0.82
-    else:
-        cx, cy = s * 0.50, s * 0.42
-        R = s * 0.245
-        body_top = s * 0.60
+    base.alpha_composite(fig, ((s - fw) // 2, (s - fh) // 2))
 
-    # ---------- 身体：红上衣，做成半身像 ----------
-    # 试过把黄短裤也画出来，但在方形图标里只剩底部一条黄边，
-    # 看起来像人被一条黄杠截断 —— 半身像反而干净，红衣服本身已经足够认人
-    bw = R * 2.55
-    d.rounded_rectangle(
-        [cx - bw / 2, body_top, cx + bw / 2, s * 1.16],
-        radius=int(bw * 0.34), fill=SHIRT,
-    )
-    d.rectangle(
-        [cx - bw / 2 + 2, body_top + R * 0.45, cx + bw / 2 - 2, s * 1.16],
-        fill=SHIRT,
-    )
-
-    # 脖子：一小段，被上衣压住一半
-    d.ellipse(
-        [cx - R * 0.24, cy + R * 0.62, cx + R * 0.24, cy + R * 1.02],
-        fill=(242, 200, 168),
-    )
-
-    # ---------- 头 ----------
-    d.ellipse([cx - R, cy - R, cx + R, cy + R], fill=SKIN)
-
-    # ---------- 头发：只有头顶一片 + 两侧鬓角 ----------
-    # 这个形象的关键是**额头大面积露出来**。用整圆盖住上半会让脸只剩一条缝，
-    # 认不出是谁；所以先画整头黑，再把额头以下挖掉
-    hair = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    hd = ImageDraw.Draw(hair)
-    hd.ellipse([cx - R, cy - R * 1.02, cx + R, cy + R * 0.98], fill=HAIR)
-    hd.rectangle([0, cy - R * 0.34, s, s], fill=(0, 0, 0, 0))
-    img.alpha_composite(hair)
-    d = ImageDraw.Draw(img, "RGBA")
-
-    # 鬓角：起于发际线上方（和头顶那一片连起来），到耳朵高度收住。
-    # 必须窄——宽一点就变成戴耳机，这个坑踩过一次
-    for sign in (-1, 1):
-        x_out = cx + sign * R * 0.90
-        d.rounded_rectangle(
-            [x_out - R * 0.055, cy - R * 0.40, x_out + R * 0.055, cy + R * 0.02],
-            radius=int(R * 0.05), fill=HAIR,
-        )
-
-    # ---------- 五官 ----------
-    # 眉毛：又粗又横，是这个形象第一眼认得出的地方。
-    # 做成斜的会变成"生气脸"—— 先试了外高内低的梯形，整张脸立刻凶了起来
-    brow_y = cy - R * 0.13
-    brow_w = R * 0.46
-    brow_h = R * 0.125
-    for sign in (-1, 1):
-        bx = cx + sign * R * 0.40
-        d.rounded_rectangle(
-            [bx - brow_w / 2, brow_y - brow_h / 2, bx + brow_w / 2, brow_y + brow_h / 2],
-            radius=int(brow_h * 0.42), fill=HAIR,
-        )
-
-    # 眼睛：黑豆 + 高光
-    eye_r = R * 0.125
-    for sign in (-1, 1):
-        ex = cx + sign * R * 0.36
-        ey = cy + R * 0.16
-        d.ellipse([ex - eye_r, ey - eye_r * 1.05, ex + eye_r, ey + eye_r * 1.05], fill=HAIR)
-        d.ellipse(
-            [ex - eye_r * 0.30, ey - eye_r * 0.82, ex + eye_r * 0.34, ey - eye_r * 0.18],
-            fill=(255, 255, 255, 235),
-        )
-
-    # 腮红
-    for sign in (-1, 1):
-        ex = cx + sign * R * 0.62
-        ey = cy + R * 0.44
-        d.ellipse(
-            [ex - R * 0.15, ey - R * 0.09, ex + R * 0.15, ey + R * 0.09],
-            fill=BLUSH + (140,),
-        )
-
-    # 嘴：细一点的小笑。线一粗就变成胡子（第一版就是这个问题）
-    d.arc(
-        [cx - R * 0.20, cy + R * 0.38, cx + R * 0.20, cy + R * 0.60],
-        start=20, end=160, fill=HAIR, width=max(2, int(R * 0.06)),
-    )
-
-    return img.resize((size, size), Image.LANCZOS)
-
-
-def draw_web_logo(size: int) -> Image.Image:
-    """网页侧栏用的方形圆角 logo。"""
-    return draw_icon(size)
+    # 再套一次圆角：人物可能压到角上，超出底板的部分要切掉
+    out = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    out.paste(base, (0, 0), mask)
+    return out.resize((size, size), Image.LANCZOS)
 
 
 def main() -> int:
@@ -166,14 +102,15 @@ def main() -> int:
     STATIC.mkdir(parents=True, exist_ok=True)
 
     for size in (16, 32, 48, 128, 256):
-        # 16/32 太小，画全身会糊成一团 —— 只画头
         out = EXT / f"icon{size}.png"
         draw_icon(size, compact=size <= 32).save(out, optimize=True)
         print(f"  {out.relative_to(ROOT)}  {size}x{size}")
 
+    # 侧栏 logo 只有 36px，用头像特写：全身像在 36px 下脸只剩十几个像素，
+    # 而侧栏里用户唯一需要认出来的是"这是谁"
     for size in (96, 192):
         out = STATIC / f"logo{size}.png"
-        draw_web_logo(size).save(out, optimize=True)
+        draw_icon(size, compact=True).save(out, optimize=True)
         print(f"  {out.relative_to(ROOT)}  {size}x{size}")
 
     print("完成")

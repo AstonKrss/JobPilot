@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "小新求职",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "蜡笔小新陪找工作：打开岗位页自动收录并当场判断你能不能投；盯 HR 回复、按关键词批量找岗。数据只留在本机。",
   "icons": {
     "16": "icon16.png",
@@ -71,5 +71,25 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "求职助手"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icon16.png",
+        "icon32.png",
+        "icon48.png",
+        "icon128.png"
+      ],
+      "matches": [
+        "https://*.zhipin.com/*",
+        "http://*.zhipin.com/*",
+        "https://*.liepin.com/*",
+        "http://*.liepin.com/*",
+        "https://*.zhaopin.com/*",
+        "http://*.zhaopin.com/*",
+        "https://*.zhaopin.cn/*",
+        "http://*.zhaopin.cn/*"
+      ]
+    }
+  ]
 }
