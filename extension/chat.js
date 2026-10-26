@@ -687,6 +687,113 @@
     autoSyncTimer = setInterval(tick, 60000);
   }
 
+  /* ---------- 后台扫描：未读检测 + 主动同步 ----------
+   *
+   * 之前只有"页面开着才同步"：HR 回了什么，除非你正好在聊天页，否则系统不知道，
+   * 也不会提醒。而求职期真正要盯的恰恰是"有没有人回我"。
+   *
+   * 现在的做法：后台定时开一个标签页打开聊天页 → 抓未读会话 → 逐个点开读消息 →
+   * 上报 → 关标签。只读不写，不点发送、不碰输入框。
+   *
+   * 必须说清的副作用：点开会话会把平台那边的未读标记清掉。
+   * 这既是副作用也是目的 —— 消息已经进本地库了，红点留着反而重复提醒。
+   */
+
+  const UNREAD_SELECTORS = [
+    '[class*="unread"]',
+    '[class*="red-dot"]',
+    '[class*="reddot"]',
+    '[class*="badge-count"]',
+    '[class*="msg-count"]',
+    '[class*="chat-badge"]',
+  ];
+
+  /** 元素有没有实际尺寸。用它而不是 offsetParent：后者在部分容器里恒为 null。 */
+  function hasSize(node) {
+    const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+    if (rect && (rect.width > 0 || rect.height > 0)) return rect;
+    if (node.offsetWidth > 0 || node.offsetHeight > 0) {
+      return { width: node.offsetWidth, height: node.offsetHeight };
+    }
+    return null;
+  }
+
+  /** 找会话列表里带未读标记的项。返回的是"会话项"，不是徽章本身。 */
+  function unreadNodes() {
+    const out = [];
+    const seen = new Set();
+    for (const sel of UNREAD_SELECTORS) {
+      document.querySelectorAll(sel).forEach((node) => {
+        // 平台会把所有会话渲染出来再隐藏，隐藏的那些没有红点，不能算未读
+        const rect = hasSize(node);
+        if (!rect) return;
+        const text = (node.innerText || '').trim();
+        const isNum = /^[1-9]\d?$/.test(text);
+        const isDot = !text && rect.width <= 16 && rect.height <= 16;
+        if (!isNum && !isDot) return;
+        const item =
+          node.closest('li, [class*="item"], [class*="session"], [class*="conversation"], [class*="list"] > *') ||
+          node;
+        // 同一个会话的徽章父子节点会命中多次，按最近的会话项去重
+        if (seen.has(item)) return;
+        seen.add(item);
+        out.push({ node: item, badge: text || '●' });
+      });
+    }
+    return out;
+  }
+
+  async function syncCurrent() {
+    const messages = readMessages();
+    const title = readJobTitle();
+    if (!messages.length) return { messages: 0, saved: 0, added_hr: 0, title };
+    const data = await callApi('/api/chat-logs/sync', {
+      platform: location.hostname,
+      page_url: location.href,
+      job_title: title || null,
+      messages: messages.map((m) => ({ role: m.role, text: m.text })),
+    });
+    return { messages: messages.length, title, ...data };
+  }
+
+  /**
+   * 同步当前会话，再逐个点开未读会话。
+   *
+   * max 默认 5：一次点太多个会话，页面会明显卡，而且失败时不好定位是哪一个。
+   * 深度扫描失败不应该让整次扫描失败 —— 至少当前会话的数据已经拿到了。
+   */
+  async function scanAndSync({ deep = true, max = 5 } = {}) {
+    const result = { ok: true, conversations: 0, added_hr: 0, unread: 0, items: [], note: '' };
+
+    const first = await syncCurrent().catch(() => null);
+    if (first) {
+      result.conversations += 1;
+      result.added_hr += first.added_hr || 0;
+      result.items.push(first);
+    }
+
+    if (!deep) return result;
+
+    const marks = unreadNodes();
+    result.unread = marks.length;
+    for (const mark of marks.slice(0, max)) {
+      try {
+        const target = mark.node.querySelector('a, button, [role="button"]') || mark.node;
+        target.click();
+        // 会话切换是异步加载消息的，1.5 秒是实测下沿；再短会读到上一个会话的残留
+        await new Promise((r) => setTimeout(r, 1500));
+        const one = await syncCurrent();
+        result.conversations += 1;
+        result.added_hr += one.added_hr || 0;
+        if (one.added_hr) result.items.push(one);
+      } catch {
+        // 单个会话失败不影响其他会话
+      }
+    }
+    if (!marks.length) result.note = '当前页面没有检测到未读会话';
+    return result;
+  }
+
   function init() {
     if (document.getElementById('job-agent-chat-host')) return;
     if (chatReady() || looksLikeChatPage()) {
@@ -709,11 +816,24 @@
     }, 1500);
   }
 
+  // 后台定时扫描时给本页发消息。聊天页可能一连开着好几个，
+  // 每个都会响应，后台按会话汇总即可，不需要在这里做互斥。
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || message.type !== 'sync-chat-now') return undefined;
+    scanAndSync({ deep: Boolean(message.deep), max: message.max || 5 })
+      .then((r) => sendResponse(r))
+      .catch((err) => sendResponse({ ok: false, error: String(err && err.message ? err.message : err) }));
+    return true;
+  });
+
   // 测试钩子：只在 check_extension_chat.js 里打开。
   // 内部函数包在 IIFE 里，不暴露的话只能靠真实浏览器点击来验证，
   // 而结构识别这种逻辑恰恰最需要能离线断言
   if (globalThis.__JOB_AGENT_TEST__) {
-    globalThis.__jobAgentChatTest = { readMessages, readByLayout, readBySelectors, diagnose, looksLikeChatPage, chatReady };
+    globalThis.__jobAgentChatTest = {
+      readMessages, readByLayout, readBySelectors, diagnose, looksLikeChatPage, chatReady,
+      unreadNodes,
+    };
   }
 
   if (document.readyState === 'loading') {

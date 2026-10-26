@@ -2282,7 +2282,7 @@ async function checkHealth() {
 // 构建标记：页脚显示，用来一眼确认浏览器加载的是不是最新版。
 // 踩过这个坑：改完样式，用户看到的是旧标签页，界面"完全没变化"，
 // 分不清是没生效还是没刷新——有这个标记就不用猜。
-const BUILD_TAG = '2026-10-24b · 岗位雷达';
+const BUILD_TAG = '2026-10-26a · 一键发现 + 消息监控';
 const buildTagEl = document.getElementById('build-tag');
 if (buildTagEl) buildTagEl.textContent = BUILD_TAG;
 

@@ -64,7 +64,15 @@ function boot(html, url = 'https://i.zhaopin.com/im?sessionId=abc') {
   };
 
   w.chrome = {
-    runtime: { id: 'test', getURL: (p) => p, sendMessage: async () => ({ ok: true }), lastError: null },
+    runtime: {
+      id: 'test',
+      getURL: (p) => p,
+      sendMessage: async () => ({ ok: true }),
+      // 后台扫描会给聊天页发 sync-chat-now，所以 chat.js 必须能监听；
+      // mock 里漏了它会让整个脚本在顶层求值时直接崩，看起来像"脚本写错了"
+      onMessage: { addListener() {} },
+      lastError: null,
+    },
     storage: { local: { get: async () => ({}), set: async () => ({}) } },
   };
   w.__JOB_AGENT_TEST__ = true;

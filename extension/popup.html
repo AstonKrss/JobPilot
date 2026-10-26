@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <style>
   body {
-    width: 280px;
+    width: 320px;
     margin: 0;
     padding: 14px 16px;
     font-family: system-ui, -apple-system, "Microsoft YaHei", sans-serif;
@@ -17,10 +17,12 @@
   .status.ok { background: #e1f5ee; color: #0f6e56; }
   .status.bad { background: #fcebeb; color: #a32d2d; }
   label { display: block; font-size: 12px; color: #6b6b66; margin-bottom: 4px; }
-  input {
+  input, textarea {
     width: 100%; box-sizing: border-box; padding: 6px 9px; font-size: 12px;
     border: 1px solid #e2e1dc; border-radius: 8px; font-family: inherit; margin-bottom: 8px;
   }
+  textarea { resize: vertical; line-height: 1.5; }
+  button:disabled { opacity: .55; cursor: default; }
   button {
     width: 100%; padding: 7px 10px; font-size: 12px; cursor: pointer;
     border: 1px solid #185fa5; background: #185fa5; color: #fff; border-radius: 8px;
@@ -47,22 +49,43 @@
   <p class="hint">打开 Boss/猎聘/智联的岗位页或搜索列表页，右下角会出现「求」按钮。列表页支持批量抓取，但只抓到卡片摘要。</p>
 
   <div class="divider">
-    <label for="crawl">批量采集（翻页抓一批）</label>
+    <label for="discover">一键发现岗位</label>
+    <input id="discover" placeholder="把平台搜索结果页的网址粘这里（用哪个词搜的都行）">
+    <label for="discover-pages" style="margin-top:2px">每个词翻几页</label>
+    <input id="discover-pages" type="number" min="1" max="5" value="2">
+    <label for="discover-kw" style="margin-top:2px">跑几个关键词</label>
+    <input id="discover-kw" type="number" min="1" max="5" value="3">
+    <button id="discover-run">开始发现</button>
+    <p class="hint" id="discover-last"></p>
+    <p class="hint">会按「发现」页算出的关键词逐个搜索、翻页、入库，全过程在后台标签页里跑（不抢焦点），结束后自动关闭。城市和筛选条件沿用你粘的那个页面的设置。<b>需要保持登录</b>。</p>
+  </div>
+
+  <div class="divider">
+    <label for="chat-url">HR 消息监控</label>
+    <textarea id="chat-url" rows="2" placeholder="聊天页网址，多个换行分隔"></textarea>
+    <div class="row"><input type="checkbox" id="chat-on"><label for="chat-on" style="margin:0">每 10 分钟检查一次</label></div>
+    <button id="chat-run" class="ghost">立即检查</button>
+    <p class="hint" id="chat-last"></p>
+    <p class="hint">后台开标签页读未读会话，<b>只在 HR 真的发了新消息时弹通知</b>。点开会话会把平台那边的红点清掉——消息已经进本地库了。需要保持登录。</p>
+  </div>
+
+  <div class="divider">
+    <label for="crawl">批量采集（只翻页，不换词）</label>
     <input id="crawl" placeholder="先在平台搜好，把结果页网址粘这里">
     <label for="crawl-pages" style="margin-top:2px">翻几页</label>
     <input id="crawl-pages" type="number" min="1" max="5" value="3">
     <button id="crawl-run" class="ghost">开始采集</button>
     <p class="hint" id="crawl-last"></p>
-    <p class="hint">会在后台标签页里翻页抓卡片（只抓摘要，不抓完整 JD），抓完自动关闭。需要保持登录。</p>
+    <p class="hint">会在后台标签页里翻页抓卡片（只抓摘要，不抓完整 JD），抓完自动关闭。</p>
   </div>
 
   <div class="divider">
-    <label for="watch">自动发现新岗位</label>
+    <label for="watch">定时扫固定页面</label>
     <input id="watch" placeholder="粘贴一个搜索结果页网址">
     <div class="row"><input type="checkbox" id="watch-on"><label for="watch-on" style="margin:0">每 2 小时自动扫一次</label></div>
     <button id="watch-run" class="ghost">立即扫一次</button>
     <p class="hint" id="watch-last"></p>
-    <p class="hint">扫描时会短暂打开一个后台标签页（不抢焦点），抓完自动关闭。需要保持登录状态，否则抓到 0 条。</p>
+    <p class="hint">只扫这一页，不翻页、不换词。适合盯一个固定的搜索条件。</p>
   </div>
 
   <script src="popup.js"></script>

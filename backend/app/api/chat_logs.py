@@ -88,23 +88,30 @@ async def sync_chat_logs(payload: ChatLogSync) -> dict:
             job_id = _ensure_skeleton_job(conn, payload.job_title)
             logger.info("聊天同步自动建档 job=%s title=%s", job_id, payload.job_title)
         saved = 0
+        added_hr = 0
+        added_me = 0
+        last_hr = ""
         for m in messages:
+            role = (m.get("role") or "HR").strip()
+            text = (m.get("text") or "").strip()
             cur = conn.execute(
                 """
                 INSERT INTO chat_log (platform, page_url, job_title, job_id, role, content)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (platform, coalesce(job_title, ''), role, content) DO NOTHING
                 """,
-                (
-                    payload.platform,
-                    payload.page_url,
-                    payload.job_title,
-                    job_id,
-                    (m.get("role") or "HR").strip(),
-                    (m.get("text") or "").strip(),
-                ),
+                (payload.platform, payload.page_url, payload.job_title, job_id, role, text),
             )
-            saved += cur.rowcount
+            if cur.rowcount:
+                saved += cur.rowcount
+                # 按角色分开计数：只有 HR 新说的才值得弹通知。
+                # 混在一起的话，用户自己刚打完一句话也会触发一条「HR 有新消息」，
+                # 通知一旦误报过两次，就再没人会点它了
+                if role == "我":
+                    added_me += 1
+                else:
+                    added_hr += 1
+                    last_hr = text
         conn.commit()
         total = conn.execute(
             "SELECT count(*) FROM chat_log WHERE job_id = %s",
@@ -113,10 +120,19 @@ async def sync_chat_logs(payload: ChatLogSync) -> dict:
 
     if saved:
         logger.info(
-            "聊天记录同步 platform=%s job=%s 新增 %d/%d",
-            payload.platform, job_id, saved, len(messages),
+            "聊天记录同步 platform=%s job=%s 新增 %d/%d（HR %d）",
+            payload.platform, job_id, saved, len(messages), added_hr,
         )
-    return {"saved": saved, "total": int(total)}
+    return {
+        "saved": saved,
+        "total": int(total),
+        # 下面三个字段只服务于「要不要提醒」这一个判断。
+        # 扩展拿不到它们就只能靠"有新增"来弹窗，而"有新增"里有一半是自己发的话
+        "added_hr": added_hr,
+        "added_me": added_me,
+        "last_hr": last_hr[:120],
+        "job_title": payload.job_title,
+    }
 
 
 @router.get("")

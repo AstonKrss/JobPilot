@@ -56,7 +56,10 @@ function makeCtx(hostname) {
         get: async () => null,
         onAlarm: { addListener() {} },
       },
-      notifications: { create() {} },
+      // 通知的点击回调也补上：聊天监控靠它跳回聊天页，
+      // 少了这个 API 扩展装了也会在顶层求值时直接崩
+      notifications: { create() {}, clear() {}, onClicked: { addListener() {} } },
+      action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
       tabs: { create: async () => ({ id: 1 }), remove: async () => {}, get: async () => ({ status: 'complete' }), sendMessage: async () => ({ ok: true }) },
       scripting: { executeScript: async () => [] },
     },

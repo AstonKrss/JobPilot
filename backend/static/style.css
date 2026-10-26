@@ -1411,3 +1411,38 @@ button.danger:hover:not(:disabled) { background: var(--danger-weak); }
   .radar-num b { font-size: 18px; }
   .plan-companies { grid-template-columns: 1fr; }
 }
+
+/* ---------- 自动发现 / 消息监控说明 ----------
+   说明文字放正文里而不是只写进扩展弹窗：用户打开「发现」页看不到任何按钮，
+   会以为"没有这个功能"。这里的作用是告诉他按钮在哪、以及为什么必须开标签页。 */
+.auto-panel { padding-bottom: 14px; }
+
+.auto-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+.auto-item {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  background: #fbfbfd;
+}
+.auto-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  margin-bottom: 4px;
+}
+.auto-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+.auto-desc code {
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: #ececf1;
+  color: var(--text);
+}

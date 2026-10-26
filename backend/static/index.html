@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>求职助手</title>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="./style.css?v=20261024b">
+<link rel="stylesheet" href="./style.css?v=20261026a">
 </head>
 <body>
 
@@ -116,6 +116,21 @@
       </header>
 
       <div id="radar-verdict"></div>
+
+      <div class="panel auto-panel">
+        <div class="panel-head"><h2>自动发现 / 消息监控</h2><span class="count">在浏览器扩展里</span></div>
+        <div class="auto-grid">
+          <div class="auto-item">
+            <div class="auto-title">一键发现岗位</div>
+            <p class="auto-desc">点浏览器工具栏的「求」→ 粘一次平台搜索结果页网址 → 「开始发现」。之后它会照下面这份关键词清单逐个搜索、翻页、入库，全程在后台标签页里跑。</p>
+          </div>
+          <div class="auto-item">
+            <div class="auto-title">HR 消息监控</div>
+            <p class="auto-desc">在同一个弹窗里填一次聊天页网址（如 <code>zhipin.com/web/geek/chat</code>），勾上「每 10 分钟检查」。只有 HR 真的发了新消息才弹通知——你自己发的不算。</p>
+          </div>
+        </div>
+        <p class="hint">两件事都必须开一个后台标签页才能做：平台的消息和搜索结果都在登录态 + 客户端渲染之后的 DOM 里，没有可直接调用的接口。标签页不抢焦点，跑完自动关闭。</p>
+      </div>
 
       <div class="panel" id="radar-plan-panel">
         <div class="panel-head">
@@ -310,6 +325,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="./app.js?v=20261024b"></script>
+<script src="./app.js?v=20261026a"></script>
 </body>
 </html>

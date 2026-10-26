@@ -486,6 +486,97 @@
     return { ok: true };
   }
 
+  // ---------- 换搜索词（一键发现用） ----------
+  //
+  // 为什么在搜索框里打字，而不是拼搜索结果 URL
+  //   各平台的搜索参数（query key、城市码、筛选位、一次性签名）拼错的表现是
+  //   「打开了一个正常页面，但结果和你搜的词无关」—— 看起来像抓取坏了，
+  //   实际是搜索没生效。在搜索框里打字是真人做的事，平台自己处理参数。
+  //
+  // 难点是 React/Vue 受控组件：直接改 input.value 不会触发框架的 onChange，
+  // 状态不会更新，按回车搜的还是旧词。必须用原型上的 setter 赋值再补发 input 事件。
+  const SEARCH_BOX_SELECTORS = [
+    '#search_input',
+    'input[placeholder*="搜索"]',
+    'input[placeholder*="职位"]',
+    'input[placeholder*="关键词"]',
+    'input[type="search"]',
+    '.search-input input',
+    '[class*="search"] input[type="text"]',
+    'input[name="query"]',
+    'input[name="key"]',
+    'input[name="keywords"]',
+  ];
+
+  function visible(el) {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 30 && rect.height > 10;
+  }
+
+  function findSearchBox() {
+    for (const sel of SEARCH_BOX_SELECTORS) {
+      const nodes = document.querySelectorAll(sel);
+      for (const el of nodes) {
+        if (visible(el) && !el.disabled && !el.readOnly) return el;
+      }
+    }
+    return null;
+  }
+
+  function setInputValue(el, value) {
+    // 原型 setter：绕过框架对 value 的劫持，否则 onChange 不触发
+    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function submitSearch(box) {
+    // 三个事件都发：有的站只监听 keydown，有的监听 keypress，
+    // 少发一个就会"没反应"，而排查时完全看不出差异
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      box.dispatchEvent(
+        new KeyboardEvent(type, {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+        }),
+      );
+    }
+  }
+
+  function clickSearchButton() {
+    const box = findSearchBox();
+    const scope = box ? box.closest('form, [class*="search"], header, div') : document;
+    const candidates = (scope || document).querySelectorAll('button, [role="button"], .search-btn, [class*="search-btn"]');
+    for (const el of candidates) {
+      const text = (el.textContent || '').trim();
+      if (/^(搜索|搜一下|查询|Search)$/i.test(text) || /search-btn/.test(String(el.className || ''))) {
+        if (visible(el)) {
+          el.click();
+          return { ok: true };
+        }
+      }
+    }
+    return { ok: false, reason: '没找到搜索按钮' };
+  }
+
+  function applySearch(keyword) {
+    const kw = String(keyword || '').trim();
+    if (!kw) return { ok: false, reason: '关键词为空' };
+    const box = findSearchBox();
+    if (!box) {
+      return {
+        ok: false,
+        reason: '这个页面没找到搜索框。先把页面停在平台的搜索结果页再试，或直接用「批量采集」',
+      };
+    }
+    box.focus();
+    setInputValue(box, kw);
+    submitSearch(box);
+    return { ok: true, keyword: kw };
+  }
+
   // ---------- 后端调用 ----------
 
   // 扩展被重新加载（改代码后点刷新）之后，已经打开的页面里留着的是旧脚本，
@@ -1447,6 +1538,22 @@
     if (message.type === 'goto-next-page') {
       try {
         sendResponse(clickNextPage());
+      } catch (err) {
+        sendResponse({ ok: false, reason: String(err && err.message ? err.message : err) });
+      }
+      return true;
+    }
+    if (message.type === 'search-keyword') {
+      try {
+        sendResponse(applySearch(message.keyword));
+      } catch (err) {
+        sendResponse({ ok: false, reason: String(err && err.message ? err.message : err) });
+      }
+      return true;
+    }
+    if (message.type === 'click-search') {
+      try {
+        sendResponse(clickSearchButton());
       } catch (err) {
         sendResponse({ ok: false, reason: String(err && err.message ? err.message : err) });
       }

@@ -206,3 +206,117 @@ if (crawlInput && crawlBtn) {
     );
   });
 }
+
+/* ---------- 一键发现 ----------
+   和后端的关系：关键词由后端 /api/radar/plan 算（它知道简历技能和筛选口径），
+   这里只负责"按这份计划去平台执行"。切词、翻页、入库全在 background 里跑。 */
+const discoverInput = document.getElementById('discover');
+const discoverPages = document.getElementById('discover-pages');
+const discoverKw = document.getElementById('discover-kw');
+const discoverBtn = document.getElementById('discover-run');
+const discoverLast = document.getElementById('discover-last');
+
+function renderDiscoverLast(last) {
+  if (!last) return;
+  const when = new Date(last.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  const head = `${when} · ${last.keywords || 0}/${last.total || 0} 个词 · 扫描 ${last.scanned || 0} 条 · 新增 ${last.added || 0} 个`;
+  const detail = (last.done || []).map((d) => `「${d.keyword}」+${d.added}`).join('  ');
+  discoverLast.textContent = [head, detail, last.note].filter(Boolean).join('\n');
+  discoverLast.style.whiteSpace = 'pre-line';
+}
+
+if (discoverInput && discoverBtn) {
+  chrome.storage.local.get(['discoverUrl', 'discoverPages', 'discoverKw', 'discoverLast']).then((s) => {
+    if (s.discoverUrl) discoverInput.value = s.discoverUrl;
+    if (s.discoverPages) discoverPages.value = s.discoverPages;
+    if (s.discoverKw) discoverKw.value = s.discoverKw;
+    renderDiscoverLast(s.discoverLast);
+  });
+
+  discoverBtn.addEventListener('click', async () => {
+    const url = discoverInput.value.trim();
+    if (!url) {
+      discoverLast.textContent = '先粘一个平台搜索结果页的网址（用哪个词搜的都行）';
+      return;
+    }
+    await chrome.storage.local.set({
+      discoverUrl: url,
+      discoverPages: discoverPages.value,
+      discoverKw: discoverKw.value,
+    });
+    discoverBtn.disabled = true;
+    discoverBtn.textContent = '发现中…（别关这个弹窗）';
+    discoverLast.textContent = '正在后台逐个关键词搜索并翻页，可能需要 1-3 分钟';
+    chrome.runtime.sendMessage(
+      {
+        type: 'discover-start',
+        url,
+        pages: Number(discoverPages.value) || 2,
+        maxKeywords: Number(discoverKw.value) || 3,
+      },
+      (resp) => {
+        discoverBtn.disabled = false;
+        discoverBtn.textContent = '开始发现';
+        if (chrome.runtime.lastError || !resp || !resp.ok) {
+          discoverLast.textContent = '执行失败：' + (chrome.runtime.lastError?.message || '后台无响应');
+          return;
+        }
+        renderDiscoverLast({ ...resp.result, at: Date.now() });
+      },
+    );
+  });
+}
+
+/* ---------- HR 消息监控 ---------- */
+const chatUrl = document.getElementById('chat-url');
+const chatOn = document.getElementById('chat-on');
+const chatBtn = document.getElementById('chat-run');
+const chatLast = document.getElementById('chat-last');
+
+function renderChatLast(last) {
+  if (!last) return;
+  const when = new Date(last.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  chatLast.textContent = `${when} · ${last.note}`;
+}
+
+if (chatUrl && chatBtn) {
+  chrome.storage.local.get(['chatUrls', 'chatOn', 'chatLast']).then((s) => {
+    if (s.chatUrls && s.chatUrls.length) chatUrl.value = s.chatUrls.join('\n');
+    chatOn.checked = Boolean(s.chatOn);
+    renderChatLast(s.chatLast);
+  });
+
+  const saveChatUrls = () => {
+    const list = chatUrl.value.split('\n').map((s) => s.trim()).filter(Boolean);
+    return chrome.storage.local.set({ chatUrls: list });
+  };
+
+  chatUrl.addEventListener('change', saveChatUrls);
+
+  chatOn.addEventListener('change', async () => {
+    await saveChatUrls();
+    await chrome.storage.local.set({ chatOn: chatOn.checked });
+    chrome.runtime.sendMessage({ type: 'chat-schedule', enabled: chatOn.checked });
+    chatLast.textContent = chatOn.checked ? '已开启，2 分钟后第一次检查' : '已关闭';
+  });
+
+  chatBtn.addEventListener('click', async () => {
+    await saveChatUrls();
+    chatBtn.disabled = true;
+    chatBtn.textContent = '检查中…';
+    chatLast.textContent = '正在后台打开聊天页读未读会话';
+    chrome.runtime.sendMessage({ type: 'chat-now' }, (resp) => {
+      chatBtn.disabled = false;
+      chatBtn.textContent = '立即检查';
+      if (chrome.runtime.lastError || !resp || !resp.ok) {
+        chatLast.textContent = '检查失败：' + (chrome.runtime.lastError?.message || '后台无响应');
+        return;
+      }
+      renderChatLast({ ...resp.result, at: Date.now() });
+      if (!(resp.result || {}).addedHr) {
+        chatLast.textContent += '\n没有新的 HR 消息就不会弹通知（这是设计，不是坏了）';
+        chatLast.style.whiteSpace = 'pre-line';
+      }
+    });
+  });
+}
