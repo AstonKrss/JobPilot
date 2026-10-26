@@ -1,5 +1,5 @@
 /**
- * 求职助手前端。
+ * 岗哨前端。
  *
  * 刻意保持无框架：只有四个视图、一次请求对应一次渲染，没有需要跨组件共享的复杂状态。
  * 引入构建工具与状态库会让「改一行看效果」多出编译等待，对单用户本地工具是负收益。
@@ -1727,7 +1727,7 @@ function appendAssistant() {
   const wrap = document.createElement('div');
   wrap.className = 'msg-assistant';
   wrap.innerHTML = `
-    <div class="msg-head"><span class="msg-mark">求</span><span class="msg-role">求职助手</span></div>
+    <div class="msg-head"><img class="msg-mark" src="./logo96.png" alt=""><span class="msg-role">岗哨</span></div>
     <div class="msg-body"></div>`;
   chatBox().appendChild(wrap);
   scrollToBottom();
@@ -2266,25 +2266,34 @@ async function checkHealth() {
     if (!data.db) {
       node.textContent = '数据库不可用';
       node.className = 'health bad';
+      node.title = '本地 Postgres 没起来，重启 start.bat 试试';
     } else if (!data.llm_configured) {
-      node.textContent = '未配置模型密钥';
+      node.textContent = '缺模型密钥';
       node.className = 'health bad';
+      node.title = '在 .env 里填 DEEPSEEK_API_KEY 才能抽取和改写';
     } else {
-      node.textContent = '就绪';
+      node.textContent = '本地就绪';
       node.className = 'health ok';
+      node.title = '本地服务已连接 · 数据不出本机';
     }
   } catch {
-    node.textContent = '服务未响应';
+    node.textContent = '服务未连接';
     node.className = 'health bad';
+    node.title = '本地服务没响应，双击 start.bat 启动';
   }
 }
 
-// 构建标记：页脚显示，用来一眼确认浏览器加载的是不是最新版。
-// 踩过这个坑：改完样式，用户看到的是旧标签页，界面"完全没变化"，
-// 分不清是没生效还是没刷新——有这个标记就不用猜。
-const BUILD_TAG = '2026-10-26a · 一键发现 + 消息监控';
+// 构建标记：左下角只显示简短版本号，完整的构建标记放进 title。
+// 之前把「2026-10-26a · 一键发现 + 消息监控」整行铺在侧栏底部，
+// 看起来像调试输出漏到了界面上；但它确实有用 ——
+// 改完样式后分不清"没生效"和"没刷新"时，靠它一眼确认。
+const APP_VERSION = 'v0.11.0';
+const BUILD_TAG = '2026-10-26b · 品牌与图标';
 const buildTagEl = document.getElementById('build-tag');
-if (buildTagEl) buildTagEl.textContent = BUILD_TAG;
+if (buildTagEl) {
+  buildTagEl.textContent = `${APP_VERSION} · 本地`;
+  buildTagEl.title = `${BUILD_TAG} · 数据不出本机`;
+}
 
 checkHealth();
 

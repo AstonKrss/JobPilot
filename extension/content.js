@@ -697,11 +697,18 @@
     shadow.innerHTML = `
       <style>
         * { box-sizing: border-box; }
+        /* 悬浮球直接放品牌形象（内联 SVG）。
+           不用 <img src="chrome-extension://...">：页面上下文加载扩展资源需要
+           web_accessible_resources，多一项权限就多一个被平台 CSP 拦掉的可能 */
         .toggle {
           width: 52px; height: 52px; border-radius: 50%; border: 0; cursor: pointer;
-          background: #185fa5; color: #fff; font-size: 13px; line-height: 1.2;
-          box-shadow: 0 4px 14px rgba(0,0,0,.18);
+          padding: 0; overflow: hidden; background: transparent;
+          line-height: 0;
+          box-shadow: 0 6px 18px rgba(80, 70, 200, .32);
+          transition: transform .16s ease, box-shadow .16s ease;
         }
+        .toggle:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(80, 70, 200, .38); }
+        .toggle:active { transform: translateY(0); }
         .panel {
           display: none; width: 340px; max-height: 76vh; overflow: auto;
           background: #fff; border: 1px solid #e2e1dc; border-radius: 12px;
@@ -718,7 +725,7 @@
           flex: 1; min-width: 120px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
           border: 1px solid #e2e1dc; background: #fff; font-size: 13px; color: #2c2c2a;
         }
-        button.act.primary { background: #185fa5; border-color: #185fa5; color: #fff; }
+        button.act.primary { background: #4f46e5; border-color: #4f46e5; color: #fff; }
         button.act:disabled { opacity: .55; cursor: not-allowed; }
         .meta { color: #6b6b66; font-size: 12px; margin-bottom: 8px; }
         .msg { font-size: 12px; margin: 6px 0; }
@@ -743,7 +750,7 @@
           display: flex; align-items: center; gap: 6px;
           margin: 0 0 8px; font-size: 12px; color: #6b6b66; cursor: pointer;
         }
-        .toggle-row input { margin: 0; accent-color: #185fa5; }
+        .toggle-row input { margin: 0; accent-color: #4f46e5; }
         textarea {
           width: 100%; height: 190px; resize: vertical; padding: 6px;
           border: 1px solid #e2e1dc; border-radius: 6px; background: #fff;
@@ -752,13 +759,32 @@
         }
       </style>
       <div class="panel" id="panel">
-        <div class="head"><b>求职助手 <span class="ver" id="ver"></span></b><button class="close" id="close">×</button></div>
+        <div class="head"><b>岗哨 <span class="ver" id="ver"></span></b><button class="close" id="close">×</button></div>
         <div class="meta" id="meta">初始化中…</div>
         <div class="row" id="actions"></div>
         <div class="msg" id="msg"></div>
         <div id="result"></div>
       </div>
-      <button class="toggle" id="toggle" title="求职助手">求</button>
+      <button class="toggle" id="toggle" title="岗哨 · 点开看这个岗位能不能投">
+        <svg viewBox="0 0 52 52" width="52" height="52" aria-hidden="true">
+          <defs>
+            <linearGradient id="gpBrand" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#635BFF"/>
+              <stop offset="1" stop-color="#38BDF8"/>
+            </linearGradient>
+          </defs>
+          <circle cx="26" cy="26" r="26" fill="url(#gpBrand)"/>
+          <circle cx="26" cy="26.5" r="13" fill="#1c1a28"/>
+          <circle cx="26" cy="29.5" r="12.2" fill="#ffdbbd"/>
+          <rect x="17.6" y="24.2" width="6" height="2.2" rx="1.1" fill="#1c1a28"/>
+          <rect x="28.4" y="24.2" width="6" height="2.2" rx="1.1" fill="#1c1a28"/>
+          <circle cx="21.6" cy="29.4" r="2.1" fill="#1c1a28"/>
+          <circle cx="30.4" cy="29.4" r="2.1" fill="#1c1a28"/>
+          <circle cx="21.1" cy="28.6" r="0.7" fill="#fff"/>
+          <circle cx="29.9" cy="28.6" r="0.7" fill="#fff"/>
+          <path d="M22.6 33.4q3.4 3 6.8 0" stroke="#1c1a28" stroke-width="1.7" fill="none" stroke-linecap="round"/>
+        </svg>
+      </button>
     `;
     ui = {
       host,
@@ -868,7 +894,7 @@
     // 带上扩展版本：用户反馈"改了没用"时，第一件事是确认装的到底是哪一版
     const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?';
     const lines = [
-      `求职助手诊断 v4 · 扩展 ${ver}`,
+      `岗哨诊断 v4 · 扩展 ${ver}`,
       `平台: ${SOURCE}`,
       `URL: ${location.href}`,
       `页面类型: ${pageKind()}`,

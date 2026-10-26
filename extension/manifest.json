@@ -1,9 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "求职助手",
-  "version": "0.10.0",
-  "description": "岗位雷达：按届别、通勤、公司质量筛出你能投的岗位；抓取 BOSS/猎聘/智联 JD，算匹配、改简历、生成 HR 回复草稿",
+  "name": "岗哨 · 本地求职副驾",
+  "version": "0.11.0",
+  "description": "打开岗位页就自动收录并当场判断你能不能投；盯 HR 回复、按关键词批量找岗。数据只留在本机。",
   "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
     "128": "icon128.png"
   },
   "permissions": [

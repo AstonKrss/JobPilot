@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>求职助手</title>
-<link rel="icon" href="./favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="./style.css?v=20261026a">
+<title>岗哨 · 本地求职副驾</title>
+<link rel="icon" href="./logo96.png" type="image/png">
+<link rel="stylesheet" href="./style.css?v=20261026d">
 </head>
 <body>
 
@@ -13,10 +13,10 @@
 
   <aside class="sidebar">
     <div class="brand">
-      <span class="brand-mark">求</span>
+      <img class="brand-logo" src="./logo96.png" alt="岗哨" width="36" height="36">
       <span class="brand-name">
-        <span class="brand-text">求职助手</span>
-        <span class="brand-sub">本地求职 Agent</span>
+        <span class="brand-text">岗哨</span>
+        <span class="brand-sub">本地求职副驾</span>
       </span>
     </div>
     <nav class="tabs">
@@ -29,8 +29,7 @@
       <button class="tab" data-view="chat">对话</button>
     </nav>
     <div class="sidebar-foot">
-      <div class="health" id="health">检查中</div>
-      <div class="ver">本地运行 · 数据不出本机</div>
+      <div class="health" id="health" title="本地服务与数据状态">检查中</div>
       <div class="ver" id="build-tag"></div>
     </div>
   </aside>
@@ -252,7 +251,7 @@
         <div class="chat-scroll" id="chat-scroll">
           <div class="chat-msgs" id="chat-msgs"></div>
           <div class="chat-empty" id="chat-empty">
-            <div class="chat-empty-mark">求</div>
+            <img class="chat-empty-mark" src="./logo96.png" alt="">
             <h2>想找什么样的工作？</h2>
             <p>说方向、城市和偏好，我会挑简历、检索岗位、算匹配，再告诉你怎么改、去哪投。</p>
             <div class="chat-samples" id="chat-samples">
@@ -325,6 +324,6 @@
 </div>
 
 <div class="toast" id="toast"></div>
-<script src="./app.js?v=20261026a"></script>
+<script src="./app.js?v=20261026d"></script>
 </body>
 </html>

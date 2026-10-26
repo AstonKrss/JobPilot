@@ -12,7 +12,11 @@
     color: #2c2c2a;
     line-height: 1.6;
   }
-  h1 { font-size: 14px; font-weight: 500; margin: 0 0 10px; }
+  .brand { display: flex; align-items: center; gap: 9px; margin: 0 0 12px; }
+  .brand img { border-radius: 8px; box-shadow: 0 2px 6px rgba(80,70,200,.24); }
+  .brand span { display: flex; flex-direction: column; line-height: 1.25; }
+  .brand b { font-size: 15px; font-weight: 650; letter-spacing: .04em; }
+  .brand i { font-size: 10.5px; color: #9a9a94; font-style: normal; letter-spacing: .06em; }
   .status { font-size: 12px; padding: 8px 10px; border-radius: 8px; background: #f1f0ec; margin-bottom: 12px; }
   .status.ok { background: #e1f5ee; color: #0f6e56; }
   .status.bad { background: #fcebeb; color: #a32d2d; }
@@ -25,18 +29,25 @@
   button:disabled { opacity: .55; cursor: default; }
   button {
     width: 100%; padding: 7px 10px; font-size: 12px; cursor: pointer;
-    border: 1px solid #185fa5; background: #185fa5; color: #fff; border-radius: 8px;
+    border: 1px solid transparent; color: #fff; border-radius: 9px;
+    background: linear-gradient(135deg, #635bff, #3b82f6);
     font-family: inherit;
   }
   .hint { color: #6b6b66; font-size: 11px; margin: 10px 0 0; }
   .divider { margin-top: 14px; padding-top: 12px; border-top: 1px solid #e2e1dc; }
   .row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #2c2c2a; margin: 6px 0 8px; }
   .row input { width: auto; margin: 0; }
-  button.ghost { background: #fff; color: #185fa5; }
+  button.ghost { background: #fff; color: #4f46e5; border-color: #ddd9ff; }
 </style>
 </head>
 <body>
-  <h1>求职助手</h1>
+  <div class="brand">
+    <img src="icon48.png" alt="" width="28" height="28">
+    <span>
+      <b>岗哨</b>
+      <i>本地求职副驾</i>
+    </span>
+  </div>
   <div class="status" id="status">检查中…</div>
 
   <label for="base">后端地址</label>

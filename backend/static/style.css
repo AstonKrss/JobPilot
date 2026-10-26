@@ -12,11 +12,13 @@
   --muted: #6e6e73;
   --faint: #aeaeb2;
 
-  /* iOS systemBlue */
-  --primary: #007aff;
-  --primary-dark: #0062cc;
-  --primary-weak: rgba(0, 122, 255, .10);
-  --primary-grad: linear-gradient(180deg, #1a8aff, #007aff);
+  /* 品牌主色：靛蓝 → 亮紫，取自 logo 底板的渐变起点。
+     原来是 iOS systemBlue，干净但没有任何识别度 —— 换掉之后
+     按钮、链接、选中态与图标是同一个色系，界面才像一个产品而不是一套组件 */
+  --primary: #4f46e5;
+  --primary-dark: #4338ca;
+  --primary-weak: rgba(79, 70, 229, .10);
+  --primary-grad: linear-gradient(180deg, #635bff, #4f46e5);
 
   --ok: #34c759;
   --ok-weak: rgba(52, 199, 89, .13);
@@ -49,7 +51,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-::selection { background: rgba(0, 122, 255, .18); }
+::selection { background: rgba(99, 91, 255, .18); }
 
 /* 细滚动条：内容区常滚动，粗滚动条很占视觉 */
 ::-webkit-scrollbar { width: 9px; height: 9px; }
@@ -79,19 +81,28 @@ body {
 
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px 6px; }
 
-.brand-mark {
-  width: 34px; height: 34px;
-  display: grid; place-items: center;
-  border-radius: 9px;
-  background: var(--primary-grad);
-  color: #fff;
-  font-size: 15px;
-  font-weight: 700;
+/* 品牌图标是脚本画的 PNG（scripts/make_brand.py），不是字体图标：
+   小尺寸下 4 倍超采样导出的边缘比任何 icon font 都干净，
+   而且换配色只改脚本里的两个常量 */
+.brand-logo {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(80, 70, 200, .22);
 }
 
-.brand-name { display: flex; flex-direction: column; line-height: 1.3; }
-.brand-text { font-weight: 650; font-size: 15px; letter-spacing: .01em; }
-.brand-sub { font-size: 11px; color: var(--faint); }
+.brand-name { display: flex; flex-direction: column; line-height: 1.25; }
+.brand-text {
+  font-weight: 700;
+  font-size: 16.5px;
+  letter-spacing: .04em;
+  color: var(--text);
+}
+.brand-sub {
+  font-size: 10.5px;
+  color: var(--faint);
+  letter-spacing: .08em;
+}
 
 .tabs { display: flex; flex-direction: column; gap: 3px; margin-top: 18px; }
 
@@ -139,18 +150,37 @@ body {
 }
 
 .sidebar-foot { margin-top: auto; padding: 0 8px; }
-.health { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+/* 状态改成 pill：原来是一行裸文字 + 一个点，和上面的导航比显得没做完。
+   加浅色底之后它变成"控件"，而不是"没排完版的文本" */
+.health {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 5px 11px 5px 9px;
+  border-radius: 999px;
+  background: rgba(120, 120, 128, .09);
+  cursor: default;
+  transition: background .2s, color .2s;
+}
 .health::before {
   content: "";
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--faint);
   flex-shrink: 0;
+  transition: background .2s, box-shadow .2s;
 }
-.health.ok { color: var(--ok); }
-.health.ok::before { background: var(--ok); box-shadow: 0 0 0 3px rgba(14, 122, 85, .14); }
-.health.bad { color: var(--danger); }
-.health.bad::before { background: var(--danger); }
-.ver { color: var(--faint); font-size: 11px; margin-top: 4px; }
+.health.ok { color: #1c7a3d; background: rgba(52, 199, 89, .12); }
+.health.ok::before {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(52, 199, 89, .16);
+}
+.health.bad { color: #b3261e; background: var(--danger-weak); }
+.health.bad::before { background: var(--danger); box-shadow: 0 0 0 3px rgba(255, 59, 48, .14); }
+
+/* 版本号只留 "v0.10.0 · 本地"，完整构建标记放进 title。
+   之前把 "2026-10-26a · 一键发现 + 消息监控" 整行铺在左下角，
+   看起来像调试输出泄漏到了界面上 */
+.ver { color: var(--faint); font-size: 10.5px; margin-top: 8px; padding-left: 2px; letter-spacing: .02em; }
 
 main {
   flex: 1;
@@ -930,11 +960,7 @@ button.danger:hover:not(:disabled) { background: var(--danger-weak); }
 .msg-mark {
   width: 22px; height: 22px;
   border-radius: 7px;
-  display: grid; place-items: center;
-  background: var(--primary-grad);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
+  display: block;
   flex: none;
 }
 .msg-role { font-size: 12.5px; font-weight: 600; color: var(--muted); }
@@ -1037,15 +1063,11 @@ button.danger:hover:not(:disabled) { background: var(--danger-weak); }
   text-align: center;
 }
 .chat-empty-mark {
-  width: 46px; height: 46px;
+  width: 52px; height: 52px;
   margin: 0 auto 16px;
-  border-radius: 14px;
-  display: grid; place-items: center;
-  background: var(--primary-grad);
-  color: #fff;
-  font-size: 20px;
-  font-weight: 700;
-  box-shadow: 0 10px 24px -10px rgba(0, 122, 255, .6);
+  display: block;
+  border-radius: 15px;
+  box-shadow: 0 10px 24px -10px rgba(79, 70, 229, .55);
 }
 .chat-empty h2 { margin: 0 0 8px; font-size: 19px; font-weight: 650; }
 .chat-empty p { margin: 0 auto 24px; color: var(--muted); font-size: 13.5px; max-width: 46ch; }

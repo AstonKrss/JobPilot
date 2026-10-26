@@ -78,8 +78,35 @@ const fullHtml = fs
   else bad('完整 HTML 引导无报错', full.errors.slice(0, 3).join(' | '));
 
   const tag = full.w.document.getElementById('build-tag');
-  if (tag && tag.textContent.trim()) ok(`页脚显示构建标记：${tag.textContent.trim()}`);
-  else bad('页脚显示构建标记', '为空或元素缺失');
+  if (tag && /^v\d+\.\d+\.\d+/.test(tag.textContent.trim())) {
+    ok(`页脚显示版本号：${tag.textContent.trim()}`);
+  } else {
+    bad('页脚显示版本号', tag ? tag.textContent.trim() : '元素缺失');
+  }
+  // 完整构建标记放进 title。之前整行铺在侧栏底部，像调试输出漏到界面上
+  if (tag && /本地|数据不出本机/.test(tag.getAttribute('title') || '')) {
+    ok('构造标记收进 title，不占版面');
+  } else {
+    bad('构造标记收进 title，不占版面', tag ? tag.getAttribute('title') : '');
+  }
+
+  // 品牌区：图标必须真实存在，否则页面上是个碎图 —— 这类问题
+  // 在 jsdom 里不会报错，只在浏览器里显形
+  const logo = full.w.document.querySelector('.brand-logo');
+  if (logo && /logo(96|192)\.png/.test(logo.getAttribute('src') || '')) {
+    ok('侧栏品牌图标已挂上');
+  } else {
+    bad('侧栏品牌图标已挂上', logo ? logo.getAttribute('src') : '元素缺失');
+  }
+  const brandText = full.w.document.querySelector('.brand-text');
+  if (brandText && brandText.textContent.trim() === '岗哨') ok('品牌名显示为「岗哨」');
+  else bad('品牌名显示为「岗哨」', brandText ? brandText.textContent : '缺失');
+
+  // 图标文件必须真的在磁盘上
+  for (const f of ['logo96.png', 'logo192.png']) {
+    if (fs.existsSync(path.join(STATIC, f))) ok(`图标文件存在：${f}`);
+    else bad(`图标文件存在：${f}`, '缺失');
+  }
 
   for (const id of ['view-workbench', 'wb-job', 'wb-resume', 'wb-stats-box', 'btn-wb-load']) {
     if (full.w.document.getElementById(id)) ok(`工作台元素存在：${id}`);
