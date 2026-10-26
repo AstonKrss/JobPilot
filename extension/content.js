@@ -759,30 +759,36 @@
         }
       </style>
       <div class="panel" id="panel">
-        <div class="head"><b>岗哨 <span class="ver" id="ver"></span></b><button class="close" id="close">×</button></div>
+        <div class="head"><b>小新求职 <span class="ver" id="ver"></span></b><button class="close" id="close">×</button></div>
         <div class="meta" id="meta">初始化中…</div>
         <div class="row" id="actions"></div>
         <div class="msg" id="msg"></div>
         <div id="result"></div>
       </div>
-      <button class="toggle" id="toggle" title="岗哨 · 点开看这个岗位能不能投">
+      <button class="toggle" id="toggle" title="小新求职 · 点开看这个岗位能不能投">
         <svg viewBox="0 0 52 52" width="52" height="52" aria-hidden="true">
           <defs>
             <linearGradient id="gpBrand" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0" stop-color="#635BFF"/>
               <stop offset="1" stop-color="#38BDF8"/>
             </linearGradient>
+            <clipPath id="gpHead"><circle cx="26" cy="27" r="13"/></clipPath>
           </defs>
           <circle cx="26" cy="26" r="26" fill="url(#gpBrand)"/>
-          <circle cx="26" cy="26.5" r="13" fill="#1c1a28"/>
-          <circle cx="26" cy="29.5" r="12.2" fill="#ffdbbd"/>
-          <rect x="17.6" y="24.2" width="6" height="2.2" rx="1.1" fill="#1c1a28"/>
-          <rect x="28.4" y="24.2" width="6" height="2.2" rx="1.1" fill="#1c1a28"/>
-          <circle cx="21.6" cy="29.4" r="2.1" fill="#1c1a28"/>
-          <circle cx="30.4" cy="29.4" r="2.1" fill="#1c1a28"/>
-          <circle cx="21.1" cy="28.6" r="0.7" fill="#fff"/>
-          <circle cx="29.9" cy="28.6" r="0.7" fill="#fff"/>
-          <path d="M22.6 33.4q3.4 3 6.8 0" stroke="#1c1a28" stroke-width="1.7" fill="none" stroke-linecap="round"/>
+          <rect x="12" y="38" width="28" height="18" rx="6" fill="#e23a34"/>
+          <circle cx="26" cy="27" r="13" fill="#ffdbbd"/>
+          <g clip-path="url(#gpHead)">
+            <rect x="10" y="11" width="32" height="12.2" fill="#1a1826"/>
+            <rect x="13" y="22" width="1.9" height="5" fill="#1a1826"/>
+            <rect x="37.1" y="22" width="1.9" height="5" fill="#1a1826"/>
+          </g>
+          <rect x="16.6" y="24.6" width="6" height="2.4" rx="1.2" fill="#1a1826"/>
+          <rect x="29.4" y="24.6" width="6" height="2.4" rx="1.2" fill="#1a1826"/>
+          <circle cx="21.6" cy="29.6" r="2" fill="#1a1826"/>
+          <circle cx="30.4" cy="29.6" r="2" fill="#1a1826"/>
+          <circle cx="21.1" cy="28.9" r="0.7" fill="#fff"/>
+          <circle cx="29.9" cy="28.9" r="0.7" fill="#fff"/>
+          <path d="M22.4 31.6q3.6 2.6 7.2 0" stroke="#1a1826" stroke-width="1.5" fill="none" stroke-linecap="round"/>
         </svg>
       </button>
     `;
@@ -894,7 +900,7 @@
     // 带上扩展版本：用户反馈"改了没用"时，第一件事是确认装的到底是哪一版
     const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?';
     const lines = [
-      `岗哨诊断 v4 · 扩展 ${ver}`,
+      `小新求职诊断 v4 · 扩展 ${ver}`,
       `平台: ${SOURCE}`,
       `URL: ${location.href}`,
       `页面类型: ${pageKind()}`,

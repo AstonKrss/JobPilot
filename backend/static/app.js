@@ -1,5 +1,5 @@
 /**
- * 岗哨前端。
+ * 小新求职前端。
  *
  * 刻意保持无框架：只有四个视图、一次请求对应一次渲染，没有需要跨组件共享的复杂状态。
  * 引入构建工具与状态库会让「改一行看效果」多出编译等待，对单用户本地工具是负收益。
@@ -1727,7 +1727,7 @@ function appendAssistant() {
   const wrap = document.createElement('div');
   wrap.className = 'msg-assistant';
   wrap.innerHTML = `
-    <div class="msg-head"><img class="msg-mark" src="./logo96.png" alt=""><span class="msg-role">岗哨</span></div>
+    <div class="msg-head"><img class="msg-mark" src="./logo96.png" alt=""><span class="msg-role">小新求职</span></div>
     <div class="msg-body"></div>`;
   chatBox().appendChild(wrap);
   scrollToBottom();
@@ -2287,8 +2287,8 @@ async function checkHealth() {
 // 之前把「2026-10-26a · 一键发现 + 消息监控」整行铺在侧栏底部，
 // 看起来像调试输出漏到了界面上；但它确实有用 ——
 // 改完样式后分不清"没生效"和"没刷新"时，靠它一眼确认。
-const APP_VERSION = 'v0.11.0';
-const BUILD_TAG = '2026-10-26b · 品牌与图标';
+const APP_VERSION = 'v0.12.0';
+const BUILD_TAG = '2026-10-26c · 小新求职';
 const buildTagEl = document.getElementById('build-tag');
 if (buildTagEl) {
   buildTagEl.textContent = `${APP_VERSION} · 本地`;

@@ -5,10 +5,11 @@
     小尺寸必然糊。这里用 4 倍超采样 + LANCZOS 缩放，每个尺寸都是独立渲染的；
     而且改配色只改一个常量，不用回去翻设计软件。
 
-形象说明
-    一个浓眉圆脸的求职小助手，风格参考用户提到的卡通角色，但**是原创形象**：
-    粗眉 + 圆脸 + 黄上衣是通用卡通语汇，没有复制任何受版权保护的角色造型。
-    商业角色（蜡笔小新）有版权，个人项目里用也有风险，所以做的是同风格的原创。
+形象
+    「小新求职」—— 红衣黄裤、粗眉圆脸、额头露出来的短发小孩。
+    角色形象属于《蜡笔小新》（原作 臼井仪人 / 版权 双叶社），
+    本项目按用户要求做个人本地使用，不做商业分发、不对外提供服务。
+    如果要公开发布或商用，这个图标必须换掉 —— 角色形象受版权保护。
 
 用法：python scripts/make_brand.py
 """
@@ -18,19 +19,19 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 EXT = ROOT / "extension"
 STATIC = ROOT / "backend" / "static"
 
-# 品牌色：深靛蓝 → 亮紫，配黄色上衣形成互补对比，小尺寸下也能一眼认出
+# 配色取自角色本身：红衣 + 黄裤，压在冷色底板上对比最强，小尺寸也能一眼认出
 BG_FROM = (99, 91, 255)
 BG_TO = (56, 189, 248)
 SKIN = (255, 219, 189)
-HAIR = (28, 26, 40)
-SHIRT = (255, 205, 60)
-BLUSH = (255, 150, 150)
+HAIR = (26, 24, 38)
+SHIRT = (226, 58, 52)
+BLUSH = (255, 148, 148)
 
 SS = 4  # 超采样倍数
 
@@ -51,7 +52,6 @@ def draw_icon(size: int, compact: bool = False) -> Image.Image:
     s = size * SS
     radius = int(s * 0.22)
 
-    # 底板：圆角矩形 + 渐变
     mask = Image.new("L", (s, s), 0)
     ImageDraw.Draw(mask).rounded_rectangle([0, 0, s - 1, s - 1], radius=radius, fill=255)
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
@@ -59,116 +59,106 @@ def draw_icon(size: int, compact: bool = False) -> Image.Image:
     d = ImageDraw.Draw(img, "RGBA")
 
     # 背景雷达弧：暗示"盯着"，同时给小尺寸一点纹理
-    for i, (r, alpha) in enumerate(((0.86, 26), (0.66, 30), (0.46, 34))):
-        box = [int(s * (0.5 - r / 2)), int(s * (0.5 - r / 2)), int(s * (0.5 + r / 2)), int(s * (0.5 + r / 2))]
+    for r, alpha in ((0.86, 24), (0.66, 28), (0.46, 32)):
+        box = [int(s * (0.5 - r / 2)), int(s * (0.5 - r / 2)),
+               int(s * (0.5 + r / 2)), int(s * (0.5 + r / 2))]
         d.arc(box, start=200, end=340, fill=(255, 255, 255, alpha), width=max(2, int(s * 0.012)))
 
     if compact:
-        head_c = (s * 0.5, s * 0.52)
-        head_r = s * 0.30
-        body_top = s * 0.80
+        cx, cy = s * 0.50, s * 0.50
+        R = s * 0.33
+        body_top = s * 0.82
     else:
-        head_c = (s * 0.5, s * 0.44)
-        head_r = s * 0.235
-        body_top = s * 0.66
+        cx, cy = s * 0.50, s * 0.42
+        R = s * 0.245
+        body_top = s * 0.60
 
-    # 身体：黄上衣的圆肩
-    body_w = head_r * 2.5
-    body_box = [
-        head_c[0] - body_w / 2,
-        body_top,
-        head_c[0] + body_w / 2,
-        s * 1.12,
-    ]
-    d.rounded_rectangle(body_box, radius=int(body_w * 0.42), fill=SHIRT)
-
-    # 领口：白色三角，避免"头直接扣在衣服上"
-    collar_y = body_top + head_r * 0.05
-    d.polygon(
-        [
-            (head_c[0] - head_r * 0.34, collar_y),
-            (head_c[0] + head_r * 0.34, collar_y),
-            (head_c[0], collar_y + head_r * 0.5),
-        ],
-        fill=(255, 255, 255, 235),
+    # ---------- 身体：红上衣，做成半身像 ----------
+    # 试过把黄短裤也画出来，但在方形图标里只剩底部一条黄边，
+    # 看起来像人被一条黄杠截断 —— 半身像反而干净，红衣服本身已经足够认人
+    bw = R * 2.55
+    d.rounded_rectangle(
+        [cx - bw / 2, body_top, cx + bw / 2, s * 1.16],
+        radius=int(bw * 0.34), fill=SHIRT,
+    )
+    d.rectangle(
+        [cx - bw / 2 + 2, body_top + R * 0.45, cx + bw / 2 - 2, s * 1.16],
+        fill=SHIRT,
     )
 
-    # 脖子（被领口压住一半，只留一点点）
+    # 脖子：一小段，被上衣压住一半
     d.ellipse(
-        [head_c[0] - head_r * 0.22, head_c[1] + head_r * 0.6,
-         head_c[0] + head_r * 0.22, head_c[1] + head_r * 1.05],
-        fill=(240, 200, 168),
+        [cx - R * 0.24, cy + R * 0.62, cx + R * 0.24, cy + R * 1.02],
+        fill=(242, 200, 168),
     )
 
-    # 头
-    d.ellipse(
-        [head_c[0] - head_r, head_c[1] - head_r, head_c[0] + head_r, head_c[1] + head_r],
-        fill=SKIN,
-    )
+    # ---------- 头 ----------
+    d.ellipse([cx - R, cy - R, cx + R, cy + R], fill=SKIN)
 
-    # 头发：上半圆 + 一点点刘海
-    d.pieslice(
-        [head_c[0] - head_r * 1.03, head_c[1] - head_r * 1.06,
-         head_c[0] + head_r * 1.03, head_c[1] + head_r * 0.98],
-        start=180, end=360, fill=HAIR,
-    )
-    # 刘海下沿：三个小三角，比一条直线更像手绘。
-    # 收得比最初浅一点：刘海压到 -0.24 的时候，眉毛和眼睛全被盖住，
-    # 整张脸只剩一张嘴 —— 眉毛是这个形象最认得出的特征，必须露出来
-    for dx in (-0.55, 0.0, 0.55):
-        bx = head_c[0] + head_r * dx
-        by = head_c[1] - head_r * 0.44
-        w = head_r * 0.30
-        d.polygon([(bx - w, by), (bx + w, by), (bx + dx * head_r * 0.15, by + head_r * 0.20)], fill=HAIR)
+    # ---------- 头发：只有头顶一片 + 两侧鬓角 ----------
+    # 这个形象的关键是**额头大面积露出来**。用整圆盖住上半会让脸只剩一条缝，
+    # 认不出是谁；所以先画整头黑，再把额头以下挖掉
+    hair = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    hd = ImageDraw.Draw(hair)
+    hd.ellipse([cx - R, cy - R * 1.02, cx + R, cy + R * 0.98], fill=HAIR)
+    hd.rectangle([0, cy - R * 0.34, s, s], fill=(0, 0, 0, 0))
+    img.alpha_composite(hair)
+    d = ImageDraw.Draw(img, "RGBA")
 
-    # 眉毛：粗、略斜，是这个形象最认得出的特征
-    brow_w = head_r * 0.42
-    brow_h = head_r * 0.15
-    for dx in (-0.40, 0.40):
-        bx = head_c[0] + head_r * dx
-        by = head_c[1] - head_r * 0.09
+    # 鬓角：起于发际线上方（和头顶那一片连起来），到耳朵高度收住。
+    # 必须窄——宽一点就变成戴耳机，这个坑踩过一次
+    for sign in (-1, 1):
+        x_out = cx + sign * R * 0.90
         d.rounded_rectangle(
-            [bx - brow_w / 2, by - brow_h / 2, bx + brow_w / 2, by + brow_h / 2],
-            radius=int(brow_h * 0.5),
-            fill=HAIR,
+            [x_out - R * 0.055, cy - R * 0.40, x_out + R * 0.055, cy + R * 0.02],
+            radius=int(R * 0.05), fill=HAIR,
         )
 
-    # 眼睛
-    eye_r = head_r * 0.145
-    for dx in (-0.38, 0.38):
-        ex = head_c[0] + head_r * dx
-        ey = head_c[1] + head_r * 0.17
-        d.ellipse([ex - eye_r, ey - eye_r * 1.1, ex + eye_r, ey + eye_r * 1.1], fill=HAIR)
-        # 高光：没有它眼睛会像两个洞
+    # ---------- 五官 ----------
+    # 眉毛：又粗又横，是这个形象第一眼认得出的地方。
+    # 做成斜的会变成"生气脸"—— 先试了外高内低的梯形，整张脸立刻凶了起来
+    brow_y = cy - R * 0.13
+    brow_w = R * 0.46
+    brow_h = R * 0.125
+    for sign in (-1, 1):
+        bx = cx + sign * R * 0.40
+        d.rounded_rectangle(
+            [bx - brow_w / 2, brow_y - brow_h / 2, bx + brow_w / 2, brow_y + brow_h / 2],
+            radius=int(brow_h * 0.42), fill=HAIR,
+        )
+
+    # 眼睛：黑豆 + 高光
+    eye_r = R * 0.125
+    for sign in (-1, 1):
+        ex = cx + sign * R * 0.36
+        ey = cy + R * 0.16
+        d.ellipse([ex - eye_r, ey - eye_r * 1.05, ex + eye_r, ey + eye_r * 1.05], fill=HAIR)
         d.ellipse(
-            [ex - eye_r * 0.28, ey - eye_r * 0.86, ex + eye_r * 0.32, ey - eye_r * 0.22],
+            [ex - eye_r * 0.30, ey - eye_r * 0.82, ex + eye_r * 0.34, ey - eye_r * 0.18],
             fill=(255, 255, 255, 235),
         )
 
     # 腮红
-    for dx in (-0.66, 0.66):
-        ex = head_c[0] + head_r * dx
-        ey = head_c[1] + head_r * 0.46
+    for sign in (-1, 1):
+        ex = cx + sign * R * 0.62
+        ey = cy + R * 0.44
         d.ellipse(
-            [ex - head_r * 0.16, ey - head_r * 0.10, ex + head_r * 0.16, ey + head_r * 0.10],
-            fill=BLUSH + (150,),
+            [ex - R * 0.15, ey - R * 0.09, ex + R * 0.15, ey + R * 0.09],
+            fill=BLUSH + (140,),
         )
 
-    # 嘴：一条小弧，配合腮红是"笑着"的表情
+    # 嘴：细一点的小笑。线一粗就变成胡子（第一版就是这个问题）
     d.arc(
-        [head_c[0] - head_r * 0.26, head_c[1] + head_r * 0.34,
-         head_c[0] + head_r * 0.26, head_c[1] + head_r * 0.66],
-        start=20, end=160, fill=HAIR, width=max(2, int(head_r * 0.11)),
+        [cx - R * 0.20, cy + R * 0.38, cx + R * 0.20, cy + R * 0.60],
+        start=20, end=160, fill=HAIR, width=max(2, int(R * 0.06)),
     )
 
-    # 缩回目标尺寸。LANCZOS 保留边缘，超采样消锯齿
     return img.resize((size, size), Image.LANCZOS)
 
 
 def draw_web_logo(size: int) -> Image.Image:
-    """网页侧栏用的方形圆角 logo：不做透明底，和卡片融合。"""
-    icon = draw_icon(size)
-    return icon
+    """网页侧栏用的方形圆角 logo。"""
+    return draw_icon(size)
 
 
 def main() -> int:
@@ -177,9 +167,8 @@ def main() -> int:
 
     for size in (16, 32, 48, 128, 256):
         # 16/32 太小，画全身会糊成一团 —— 只画头
-        img = draw_icon(size, compact=size <= 32)
         out = EXT / f"icon{size}.png"
-        img.save(out, optimize=True)
+        draw_icon(size, compact=size <= 32).save(out, optimize=True)
         print(f"  {out.relative_to(ROOT)}  {size}x{size}")
 
     for size in (96, 192):

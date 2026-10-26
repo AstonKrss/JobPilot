@@ -99,8 +99,8 @@ const fullHtml = fs
     bad('侧栏品牌图标已挂上', logo ? logo.getAttribute('src') : '元素缺失');
   }
   const brandText = full.w.document.querySelector('.brand-text');
-  if (brandText && brandText.textContent.trim() === '岗哨') ok('品牌名显示为「岗哨」');
-  else bad('品牌名显示为「岗哨」', brandText ? brandText.textContent : '缺失');
+  if (brandText && brandText.textContent.trim() === '小新求职') ok('品牌名显示为「小新求职」');
+  else bad('品牌名显示为「小新求职」', brandText ? brandText.textContent : '缺失');
 
   // 图标文件必须真的在磁盘上
   for (const f of ['logo96.png', 'logo192.png']) {
