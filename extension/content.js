@@ -30,7 +30,12 @@
       // 这里必须写字面量。之前写成 SOURCE，而 SOURCE 在文件后面才 const 声明，
       // 对象字面量求值时直接命中 TDZ，整个 content.js 顶层抛错、UI 一个都不出现。
       // 表现是"某个平台不显示插件"，很容易被误判成选择器不匹配。
-      source: 'zhipin',
+      //
+      // 值必须是 'boss' 而不是 'zhipin'：后端 job.source 有 CHECK 约束，
+      // 只收 boss/liepin/zhaopin/manual。写成 zhipin 会让入库被数据库拒绝，
+      // 而当时为了绕开这一点，ingestJob 里把 source 写死成 'boss' ——
+      // 于是猎聘和智联抓来的岗位全被记成 Boss 的，平台筛选和雷达全错。
+      source: 'boss',
       detailPath: /\/job_detail\//,
       jd: [
         '.job-detail-container',
@@ -161,6 +166,11 @@
   const AUTO_STABLE_TICKS = 2;        // 连续两拍看到同一个岗位才算"停下来了"
   const AUTO_MIN_GAP_MS = 3000;       // 两次自动收录的最小间隔
   const AUTO_MAX_PER_PAGE = 40;       // 单页上限，防止长列表一路点下去烧钱
+  // 列表页自动收录的单次上限。必须声明在这里而不是渲染代码附近：
+  // renderActions 会把它插进模板字符串，而 renderActions 在挂载时就执行，
+  // 声明晚了会命中 TDZ —— 整个 content.js 顶层抛错，UI 一个都不出现。
+  // 之前就是因为 source: 'zhipin' 写成了 SOURCE，踩过同一个坑
+  const AUTO_LIST_MAX = 12;
   const INGESTED_KEY = 'jobagent:auto-ingested';
 
   // 纯函数由 lib.js 提供（拆成独立文件才能脱离浏览器做单测）
@@ -795,7 +805,11 @@
     if (!box) return;
     box.addEventListener('change', () => {
       setAutoIngest(box.checked);
-      say(box.checked ? '已开启自动收录：点开岗位即入库' : '已关闭自动收录');
+      say(
+        box.checked
+          ? '已开启自动收录：翻列表页会把当前页收进来，点开岗位会收完整 JD'
+          : '已关闭自动收录（「批量抓取」仍然可以手动跑）',
+      );
     });
   }
 
@@ -825,7 +839,7 @@
         </label>
         <label class="toggle-row">
           <input type="checkbox" id="auto-ingest" ${autoIngest ? 'checked' : ''}>
-          自动收录（点开岗位即入库，每个约 ¥0.003）
+          浏览即收录（进入新列表页自动抓当前页 ${AUTO_LIST_MAX} 条摘要，每条约 ¥0.003）
         </label>
         <button class="act" id="act-diag">诊断页面结构</button>
       `;
@@ -1118,7 +1132,9 @@
 
   function ingestJob({ rawText, url, sourceJobId, detailLevel }) {
     return callApi('/api/jobs/ingest', 'POST', {
-      source: 'boss',
+      // 用当前平台的真实来源。写死 'boss' 会让猎聘/智联的岗位全部记成 Boss，
+      // 平台筛选、雷达的来源标签、按平台统计都跟着错
+      source: SOURCE,
       raw_text: rawText,
       url,
       source_job_id: sourceJobId,
@@ -1171,6 +1187,118 @@
     return null;
   }
 
+  /**
+   * 入库后立刻问后端"这个岗位我能不能投"，把结论贴在面板上。
+   *
+   * 为什么必须在抓取现场给结论：等用户想起来去「发现」页翻，这个岗位多半
+   * 已经关掉了。用户在浏览岗位时唯一想知道的就是这一句。
+   *
+   * 判定失败不影响入库结果，所以静默 —— 这只是附加信息，不该盖掉"已收录"。
+   */
+  async function showVerdict(jobId) {
+    try {
+      const v = await callApi(`/api/radar/job/${jobId}`, 'GET');
+      if (!v || !v.advice) return;
+      const kind = v.gate.grade === 'blocked' ? 'err'
+        : v.gate.grade === 'reachable' ? 'ok' : '';
+      const tier = v.company_score ? ` · ${v.company_score.tier}` : '';
+      say(`${v.advice}${tier}`, kind);
+    } catch {
+      /* 判定是附加信息，失败就保留"已收录"那条 */
+    }
+  }
+
+  // ---------- 列表页自动收录 ----------
+  //
+  // 用户"在浏览岗位"时，插件应该顺手把当前页收进来，而不是等他点按钮。
+  // 只抓当前页，不自动翻页 —— 翻页会打断他正在看的列表，也更容易被风控盯上。
+  //
+  // 每个列表 URL 只扫一次：SPA 在同一个 URL 下会因为筛选变化重渲染，
+  // 不按 URL 去重的话，用户每改一次筛选就白跑一遍二十条 JD 抽取。
+  const AUTO_LIST_KEY = 'jobagent:auto-list-url';
+  const AUTO_LIST_MAX_TRIES = 20;    // 卡片没渲染出来时最多等多少拍（约 18 秒）
+  let autoListBusy = false;
+  let autoListScanned = new Set();
+  let autoListTries = 0;
+
+  function loadListScanned() {
+    try {
+      return new Set(JSON.parse(sessionStorage.getItem(AUTO_LIST_KEY) || '[]'));
+    } catch {
+      return new Set();
+    }
+  }
+  autoListScanned = loadListScanned();
+
+  async function autoScanList() {
+    if (!autoIngest || autoListBusy || batchBusy || !runtimeAlive()) return;
+    if (pageKind() !== 'list') return;
+    const url = location.href.split('#')[0];
+    if (autoListScanned.has(url)) return;
+
+    // 卡片是异步渲染的：第一拍常常还是空的。这里先不登记 URL，
+    // 空结果就下一拍再来，最多等 AUTO_LIST_MAX_TRIES 拍。
+    // 过早登记会导致"进页面那一刻卡片没出来"就永久跳过这一页 —— 而且是静默的
+    const list = scrapeList(AUTO_LIST_MAX);
+    if (!list.items.length) {
+      autoListTries += 1;
+      if (autoListTries > AUTO_LIST_MAX_TRIES) {
+        autoListScanned.add(url);
+        try {
+          sessionStorage.setItem(AUTO_LIST_KEY, JSON.stringify([...autoListScanned].slice(-30)));
+        } catch {
+          /* 存不了就算了 */
+        }
+      }
+      return;
+    }
+    autoListTries = 0;
+
+    autoListBusy = true;
+    autoListScanned.add(url);
+    try {
+      sessionStorage.setItem(AUTO_LIST_KEY, JSON.stringify([...autoListScanned].slice(-30)));
+    } catch {
+      /* 存不了就在本次会话内存里去重 */
+    }
+
+    try {
+      say(`列表页自动收录中：识别到 ${list.items.length} 个岗位…`);
+      let added = 0;
+      let seen = 0;
+      for (const item of list.items) {
+        if (!runtimeAlive()) {
+          say(RELOAD_HINT, 'err');
+          return;
+        }
+        const key = item.source_job_id || item.url;
+        if (!key) continue;
+        seen += 1;
+        try {
+          const res = await ingestJob({
+            rawText: `${item.title || ''}\n${item.raw_text}`,
+            url: item.url,
+            sourceJobId: item.source_job_id,
+            detailLevel: 'digest',
+          });
+          if (res && res.is_new) added += 1;
+        } catch (err) {
+          if (isInvalidated(err.message)) {
+            stopAutoWatch();
+            say(RELOAD_HINT, 'err');
+            return;
+          }
+          // 单条失败继续：列表卡片偶尔缺字段，跳过即可
+        }
+      }
+      say(`列表页已收录 ${added} 个新岗位（扫描 ${seen} 个）· 点「批量抓取」可抓完整 JD`, added ? 'ok' : '');
+    } catch (err) {
+      say(`列表页自动收录失败：${err.message}`, 'err');
+    } finally {
+      autoListBusy = false;
+    }
+  }
+
   async function autoIngestOnce(name) {
     const jd = pickJdContainer();
     if (!jd) return;
@@ -1197,7 +1325,10 @@
       });
       autoCount += 1;
       markIngested(key);
-      if (!batchBusy) say(`已自动收录 #${res.job_id} ${name}（共 ${autoCount} 个）`, 'ok');
+      if (!batchBusy) {
+        say(`已自动收录 #${res.job_id} ${name}（共 ${autoCount} 个）`, 'ok');
+        if (res.job_id) showVerdict(res.job_id);
+      }
     } catch (err) {
       if (isInvalidated(err.message)) {
         stopAutoWatch();
@@ -1211,6 +1342,10 @@
 
   function autoTick() {
     if (!autoIngest || batchBusy || !runtimeAlive()) return;
+
+    // 列表页先做一次整页收录，再走"详情面板逐条收录"的老路。
+    // 两件事不冲突：整页收录拿的是摘要，右侧面板打开的那条能拿到完整 JD
+    if (pageKind() === 'list') autoScanList();
 
     // 列表页看右侧面板，详情页看页面本身，两处都能取到当前岗位名
     const name = panelJobName();

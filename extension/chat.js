@@ -665,26 +665,58 @@
    * 所以没有封号风险。60 秒一拍，对页面几乎无感。
    */
   let autoSyncTimer = null;
+  let liveObserver = null;
+  let liveDebounce = null;
+
+  async function syncTick() {
+    try {
+      const messages = readMessages();
+      const title = readJobTitle();
+      // 没读到消息就跳过：可能是会话没选、也可能页面在切换中
+      if (!messages.length) return;
+      await callApi('/api/chat-logs/sync', {
+        platform: location.hostname,
+        page_url: location.href,
+        job_title: title || null,
+        messages: messages.map((m) => ({ role: m.role, text: m.text })),
+      });
+    } catch {
+      // 定时任务失败不打扰用户：后端没启动、扩展刚更新都会走到这里
+    }
+  }
+
+  /**
+   * 实时同步：消息区一有变化就同步，而不是等下一个 60 秒。
+   *
+   * 为什么之前不够：HR 回了一句，用户在工作台上要最多等一分钟才看得到，
+   * 而这个页面他可能只停留十几秒。60 秒轮询对"正在聊"的场景太慢。
+   *
+   * 保留 60 秒轮询不动：MutationObserver 在会话切换、虚拟列表复用节点时
+   * 可能漏掉变化，定时那一拍是兜底。
+   */
+  function startLiveSync() {
+    if (liveObserver) return;
+    const anchor = findInput();
+    const region = (anchor && findChatRegion(anchor)) || document.body;
+    if (!region) return;
+    liveObserver = new MutationObserver(() => {
+      // 消息区一次性插入多条时会连续触发几十次，1.2 秒内的变化合并成一次
+      clearTimeout(liveDebounce);
+      liveDebounce = setTimeout(syncTick, 1200);
+    });
+    try {
+      liveObserver.observe(region, { childList: true, subtree: true, characterData: true });
+    } catch {
+      // 观察失败就只靠定时轮询，不影响功能
+      liveObserver = null;
+    }
+  }
+
   function startAutoSync() {
     if (autoSyncTimer) return;
-    const tick = async () => {
-      try {
-        const messages = readMessages();
-        const title = readJobTitle();
-        // 没读到消息就跳过：可能是会话没选、也可能页面在切换中
-        if (!messages.length) return;
-        await callApi('/api/chat-logs/sync', {
-          platform: location.hostname,
-          page_url: location.href,
-          job_title: title || null,
-          messages: messages.map((m) => ({ role: m.role, text: m.text })),
-        });
-      } catch {
-        // 定时任务失败不打扰用户：后端没启动、扩展刚更新都会走到这里
-      }
-    };
-    tick(); // 进来先同步一次，不用等第一个 60 秒
-    autoSyncTimer = setInterval(tick, 60000);
+    syncTick(); // 进来先同步一次，不用等第一个 60 秒
+    autoSyncTimer = setInterval(syncTick, 60000);
+    startLiveSync();
   }
 
   /* ---------- 后台扫描：未读检测 + 主动同步 ----------

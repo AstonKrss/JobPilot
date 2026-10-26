@@ -168,6 +168,77 @@ def _radar_score(pref: dict, company_score: float, match_score: float | None, di
     return round(sum(w * v for w, v in parts) / total_w, 1)
 
 
+def _enrich_pref(conn: psycopg.Connection, pref: dict, resume_id: int | None) -> dict:
+    """届别与学历留空时从主简历补。这两条是判断的基础，让用户手填纯属找麻烦。"""
+    if pref.get("graduation_year") is not None and pref.get("edu_level"):
+        return pref
+    rid = resume_id or repo.get_default_resume_id(conn)
+    if not rid:
+        return pref
+    prof = match_repo.get_current_profile(conn, rid)
+    basic = (prof or {}).get("basic") or {}
+    if pref.get("graduation_year") is None and basic.get("graduation_year"):
+        pref = {**pref, "graduation_year": int(basic["graduation_year"])}
+    if not pref.get("edu_level") and basic.get("edu_level"):
+        pref = {**pref, "edu_level": basic["edu_level"]}
+    return pref
+
+
+def _engine_view(job: dict) -> dict:
+    """雷达行 → 匹配引擎要的字段。过滤器两处都要用，抽出来避免字段漏传。"""
+    keys = (
+        "job_id", "title", "company", "city", "job_nature", "edu_level",
+        "edu_fulltime_required", "exp_min", "exp_max", "must_have_skills",
+        "nice_to_have_skills", "hard_constraint_evidence", "detail_level", "url",
+    )
+    return {k: job.get(k) for k in keys}
+
+
+def _build_item(
+    job: dict, pref: dict, index: dict, stats: dict, match: dict
+) -> dict:
+    """把一条岗位组装成雷达条目。
+
+    列表接口与单岗位接口共用同一个函数。分开写两份的后果很具体：
+    插件里显示的判定和雷达页上的判定不一致，而用户会同时看到这两个地方。
+    """
+    g = gate.evaluate(job, pref)
+    comp = index.get(job["company_key"]) if job["company_key"] else None
+    cscore = company_mod.score(comp, stats.get(job["company_key"] or ""))
+    return {
+        "job_id": job["job_id"],
+        "title": job["title"],
+        "company": job["company"],
+        "city": job["city"],
+        "salary_raw": job["salary_raw"],
+        "job_nature": job["job_nature"],
+        "edu_level": job["edu_level"],
+        "exp_min": job["exp_min"],
+        "exp_max": job["exp_max"],
+        "graduate_years": job["graduate_years"],
+        "campus_type": job["campus_type"],
+        "detail_level": job["detail_level"],
+        "url": job["url"],
+        "source": job["source"],
+        "must_have_skills": job["must_have_skills"][:6],
+        "company_profile": None
+        if comp is None
+        else {
+            "name": comp["name"],
+            "parent": comp["parent"],
+            "industry": comp["industry"],
+            "nature": comp["nature"],
+            "tags": comp["tags"],
+            "note": comp["note"],
+            "source": comp["source"],
+        },
+        "company_score": cscore,
+        "gate": g,
+        "match": match,
+        "radar_score": _radar_score(pref, cscore["score"], match.get("score"), g["distance"]),
+    }
+
+
 @router.get("")
 def get_radar(
     resume_id: int | None = None,
@@ -179,16 +250,7 @@ def get_radar(
         company_mod.ensure_seed(conn)
         pref = _load_pref(conn)
 
-        # 届别与学历留空时从主简历补：这两条是判断的基础，让用户手填纯属找麻烦
-        if pref.get("graduation_year") is None or not pref.get("edu_level"):
-            rid = resume_id or repo.get_default_resume_id(conn)
-            if rid:
-                prof = match_repo.get_current_profile(conn, rid)
-                basic = (prof or {}).get("basic") or {}
-                if pref.get("graduation_year") is None and basic.get("graduation_year"):
-                    pref["graduation_year"] = int(basic["graduation_year"])
-                if not pref.get("edu_level") and basic.get("edu_level"):
-                    pref["edu_level"] = basic["edu_level"]
+        pref = _enrich_pref(conn, pref, resume_id)
 
         jobs = _job_rows(conn)
         companies = company_mod.load_all(conn)
@@ -210,25 +272,7 @@ def get_radar(
         if rid:
             profile = match_repo.get_current_profile(conn, rid)
             if profile:
-                engine_jobs = [
-                    {
-                        "job_id": j["job_id"],
-                        "title": j["title"],
-                        "company": j["company"],
-                        "city": j["city"],
-                        "job_nature": j["job_nature"],
-                        "edu_level": j["edu_level"],
-                        "edu_fulltime_required": j["edu_fulltime_required"],
-                        "exp_min": j["exp_min"],
-                        "exp_max": j["exp_max"],
-                        "must_have_skills": j["must_have_skills"],
-                        "nice_to_have_skills": j["nice_to_have_skills"],
-                        "hard_constraint_evidence": j["hard_constraint_evidence"],
-                        "detail_level": j["detail_level"],
-                        "url": j["url"],
-                    }
-                    for j in jobs
-                ]
+                engine_jobs = [_engine_view(j) for j in jobs]
                 for r in rank(profile, engine_jobs, {"accept_relocation": True,
                                                     "accept_outsourcing": pref["accept_outsourcing"],
                                                     "accept_internship": pref["stage"] != "campus",
@@ -258,52 +302,13 @@ def get_radar(
         grade_counter: Counter[str] = Counter()
         offtopic_count = 0
         for job in jobs:
-            g = gate.evaluate(job, pref)
-            grade_counter[g["grade"]] += 1
-            if g.get("offtopic"):
+            item = _build_item(job, pref, index, stats, match_by_job.get(job["job_id"]) or {})
+            grade_counter[item["gate"]["grade"]] += 1
+            if item["gate"].get("offtopic"):
                 offtopic_count += 1
-            comp = index.get(job["company_key"]) if job["company_key"] else None
-            cscore = company_mod.score(comp, stats.get(job["company_key"] or ""))
-            m = match_by_job.get(job["job_id"]) or {}
-            radar = _radar_score(pref, cscore["score"], m.get("score"), g["distance"])
-
-            if g["grade"] == "blocked" and not include_blocked:
+            if item["gate"]["grade"] == "blocked" and not include_blocked:
                 continue
-
-            items.append(
-                {
-                    "job_id": job["job_id"],
-                    "title": job["title"],
-                    "company": job["company"],
-                    "city": job["city"],
-                    "salary_raw": job["salary_raw"],
-                    "job_nature": job["job_nature"],
-                    "edu_level": job["edu_level"],
-                    "exp_min": job["exp_min"],
-                    "exp_max": job["exp_max"],
-                    "graduate_years": job["graduate_years"],
-                    "campus_type": job["campus_type"],
-                    "detail_level": job["detail_level"],
-                    "url": job["url"],
-                    "source": job["source"],
-                    "must_have_skills": job["must_have_skills"][:6],
-                    "company_profile": None
-                    if comp is None
-                    else {
-                        "name": comp["name"],
-                        "parent": comp["parent"],
-                        "industry": comp["industry"],
-                        "nature": comp["nature"],
-                        "tags": comp["tags"],
-                        "note": comp["note"],
-                        "source": comp["source"],
-                    },
-                    "company_score": cscore,
-                    "gate": g,
-                    "match": m,
-                    "radar_score": radar,
-                }
-            )
+            items.append(item)
 
         # 排序和匹配引擎同口径：先按结论（可达 > 勉强 > 待确认 > 不可达），
         # 再按雷达分。只按分排会把"字段缺失、结论不可信"的岗位顶到前面，
@@ -384,6 +389,89 @@ def _verdict(items: list[dict], counts: Counter, offtopic: int) -> dict:
             f"另有 {blocked} 个已排除（{offtopic} 个方向不对口），不会占用你的注意力。"
         ),
     }
+
+
+@router.get("/job/{job_id}")
+def job_verdict(job_id: int, resume_id: int | None = None) -> dict:
+    """单个岗位的雷达判定。
+
+    谁在用：插件把一条岗位入库之后立刻调它，在悬浮面板上显示
+    「能不能投 / 为什么」。这件事必须在抓取现场发生 ——
+    等用户想起来去「发现」页翻，大概率已经投完或者关掉页面了。
+
+    口径与雷达列表完全一致（共用 _build_item），否则同一个岗位在两个地方
+    显示不同结论，用户只会更困惑。
+    """
+    with get_pool().connection() as conn:
+        company_mod.ensure_seed(conn)
+        pref = _enrich_pref(conn, _load_pref(conn), resume_id)
+        jobs = [j for j in _job_rows(conn) if j["job_id"] == job_id]
+        if not jobs:
+            raise HTTPException(status_code=404, detail="岗位不存在或还没有画像")
+        job = jobs[0]
+
+        index = company_mod.build_index(company_mod.load_all(conn))
+        stats = _company_stats(conn)
+        if job["company_key"] and job["company_key"] not in index:
+            company_mod.learn(conn, index, job["company"])
+
+        match: dict = {}
+        rid = resume_id or repo.get_default_resume_id(conn)
+        if rid:
+            profile = match_repo.get_current_profile(conn, rid)
+            if profile:
+                r = rank(
+                    profile,
+                    [_engine_view(job)],
+                    {
+                        "accept_relocation": True,
+                        "accept_outsourcing": pref["accept_outsourcing"],
+                        "accept_internship": pref["stage"] != "campus",
+                        "accept_parttime": False,
+                        "target_cities": pref["cities"],
+                    },
+                )[0]
+                mscore = r.score
+                if mscore is None and r.skill_must_count:
+                    mscore = 100.0 * r.skill_hit_count / r.skill_must_count
+                match = {
+                    "score": mscore,
+                    "display_score": r.display_score,
+                    "reliable": r.confidence >= 0.6,
+                    "decision": r.decision.value,
+                    "hit": r.skill_hit_count,
+                    "must": r.skill_must_count,
+                    "missed": r.missed_skills[:3],
+                }
+
+        item = _build_item(job, pref, index, stats, match)
+
+    item["advice"] = _advice_line(item)
+    return item
+
+
+def _advice_line(item: dict) -> str:
+    """一句话结论，插件直接贴在面板上。
+
+    只输出一条。给三条等于没给，而悬浮面板那一行本来就只能放一句话。
+    """
+    g = item["gate"]
+    tier = item["company_score"]
+    if g.get("offtopic"):
+        return f"方向不对口：{g['blockers'][0] if g['blockers'] else '不是技术岗'}"
+    if g["grade"] == "blocked":
+        reason = g["blockers"][0] if g["blockers"] else "硬条件不满足"
+        return f"别投：{reason}"
+    if g["grade"] == "unknown":
+        miss = "、".join(g["missing"][:2]) or "关键字段"
+        return f"待确认：{miss}没抓到，先点开原站核实"
+    best = f"{tier['label']} {tier['score']:.0f} 分"
+    if item["company_profile"] and item["company_profile"].get("parent"):
+        best = f"{item['company_profile']['parent']}旗下 · {best}"
+    if g["grade"] == "stretch":
+        caution = g["cautions"][0] if g["cautions"] else "有条件"
+        return f"可以试 · {best} · 注意：{caution}"
+    return f"可以投 · {best} · {g['distance_label']}"
 
 
 @router.put("/pref")

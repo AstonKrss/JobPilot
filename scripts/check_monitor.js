@@ -20,19 +20,26 @@ const EXT = path.join(ROOT, 'extension');
 
 let pass = 0;
 let fail = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ok = (m) => { console.log(`[PASS] ${m}`); pass += 1; };
 const bad = (m, d) => { console.log(`[FAIL] ${m}${d ? ' — ' + d : ''}`); fail += 1; };
 
 /** 统一的 chrome mock。onMessage.addListener 会把回调存下来供测试直接触发。 */
 function makeChrome() {
   const listeners = [];
+  // 记录所有发往后端的请求，用来断言"什么时候同步了什么"
+  const calls = [];
   return {
     listeners,
+    calls,
     api: {
       runtime: {
         id: 'test',
         getURL: (p) => p,
-        sendMessage: async () => ({ ok: true, data: {} }),
+        sendMessage: async (msg) => {
+          calls.push(msg);
+          return { ok: true, data: {} };
+        },
         onMessage: { addListener: (fn) => listeners.push(fn) },
         lastError: null,
       },
@@ -74,7 +81,7 @@ function bootChat(html) {
   w.chrome = chromeMock.api;
   w.__JOB_AGENT_TEST__ = true;
   w.eval(fs.readFileSync(path.join(EXT, 'chat.js'), 'utf8'));
-  return { w, api: w.__jobAgentChatTest, listeners: chromeMock.listeners };
+  return { w, api: w.__jobAgentChatTest, listeners: chromeMock.listeners, calls: chromeMock.calls };
 }
 
 const CHAT_HTML = `<!DOCTYPE html><html><body>
@@ -204,6 +211,85 @@ function sendTo(listeners, msg) {
     const r = await sendTo(cm.listeners, { type: 'search-keyword', keyword: 'Java' });
     if (r && r.ok === false && /搜索框/.test(r.reason || '')) ok('找不到搜索框时给出可读原因');
     else bad('找不到搜索框时给出可读原因', JSON.stringify(r));
+  }
+
+  console.log('\n== 聊天页实时同步 ==');
+  {
+    const chat = bootChat(CHAT_HTML);
+    await sleep(400);
+    const syncs = () => chat.calls.filter((c) => c.path === '/api/chat-logs/sync');
+    const first = syncs().length;
+    if (first >= 1) ok('打开聊天页立即同步一次，不用等 60 秒');
+    else bad('打开聊天页立即同步一次，不用等 60 秒', `调用 ${first} 次`);
+
+    // 模拟 HR 发来一条新消息：往消息区插一个节点
+    const win = chat.w.document.querySelector('.chat-window');
+    const div = chat.w.document.createElement('div');
+    div.className = 'message-item';
+    div.textContent = '明天下午三点方便面试吗';
+    win.appendChild(div);
+
+    // 防抖是 1.2 秒，留够余量
+    await sleep(1900);
+    if (syncs().length > first) ok('消息区变化后自动同步（无需刷新页面）');
+    else bad('消息区变化后自动同步（无需刷新页面）', `仍是 ${syncs().length} 次`);
+
+    const last = syncs().pop();
+    const roles = ((last && last.body && last.body.messages) || []).map((m) => m.role);
+    if (roles.length) ok('同步内容带角色（区分我和 HR）');
+    else bad('同步内容带角色（区分我和 HR）', JSON.stringify(last && last.body && last.body.messages));
+  }
+
+  console.log('\n== 平台来源 ==');
+  {
+    const raw = fs.readFileSync(path.join(EXT, 'content.js'), 'utf8');
+    // 只看代码，不看注释：注释里为了解释历史会写到错误的写法，
+    // 拿全文匹配会把这些说明当成"代码里还在用" —— 这个误报出现过一次
+    const content = raw
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n');
+    // 后端 job.source 只收 boss/liepin/zhaopin/manual。
+    // 曾经写成 'zhipin' 导致入库被拒，于是有人把 source 写死成 'boss' 绕过去 ——
+    // 结果是猎聘和智联的岗位全被记成 Boss 的
+    const bossMarks = (content.match(/source: 'boss'/g) || []).length;
+    if (bossMarks === 1) ok('Boss 只在一处声明来源（没有在 ingestJob 里写死）');
+    else bad('Boss 只在一处声明来源（没有在 ingestJob 里写死）', `出现 ${bossMarks} 次`);
+
+    if (/source: 'zhipin'/.test(content)) bad("来源没有用 'zhipin'（后端 CHECK 不接受）");
+    else ok("来源没有用 'zhipin'（后端 CHECK 不接受）");
+
+    const at = content.indexOf('function ingestJob');
+    const ingest = at >= 0 ? content.slice(at, at + 700) : '';
+    if (ingest && /source: SOURCE/.test(ingest)) ok('入库用当前平台的真实来源');
+    else bad('入库用当前平台的真实来源', ingest ? '没找到 source: SOURCE' : '没找到 ingestJob');
+
+    if (/source: 'liepin'/.test(content) && /source: 'zhaopin'/.test(content)) {
+      ok('猎聘 / 智联 各自有独立来源标记');
+    } else {
+      bad('猎聘 / 智联 各自有独立来源标记');
+    }
+  }
+
+  console.log('\n== 随浏览自动收录 ==');
+  {
+    const content = fs
+      .readFileSync(path.join(EXT, 'content.js'), 'utf8')
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n');
+    if (/function autoScanList/.test(content) && /pageKind\(\) === 'list'\).*autoScanList\(\)/.test(content)) {
+      ok('列表页会随浏览自动收录当前页');
+    } else {
+      bad('列表页会随浏览自动收录当前页');
+    }
+    if (/showVerdict\(res\.job_id\)/.test(content)) ok('详情页收录后立刻拉取雷达判定');
+    else bad('详情页收录后立刻拉取雷达判定');
+    if (/AUTO_LIST_MAX_TRIES/.test(content) && /autoListTries/.test(content)) {
+      ok('卡片还没渲染时不会把这一页永久跳过');
+    } else {
+      bad('卡片还没渲染时不会把这一页永久跳过');
+    }
   }
 
   console.log('\n== background 接线 ==');

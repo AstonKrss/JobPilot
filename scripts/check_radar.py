@@ -189,6 +189,25 @@ def main() -> int:
         top = companies["items"][0]
         check("公司列表按分数降序", top["score"] >= companies["items"][-1]["score"])
 
+        # 单岗位判定：插件在抓取现场调它，所以它必须能独立工作
+        one = get("/api/radar/job/%d" % blocked["items"][0]["job_id"])
+        check("GET /api/radar/job/{id} 返回单条判定", one.get("job_id") == blocked["items"][0]["job_id"])
+        check("单岗位判定带一句话结论", isinstance(one.get("advice"), str) and len(one["advice"]) > 4)
+        check("单岗位结论带明确动作",
+              any(k in one["advice"] for k in ("可以投", "可以试", "别投", "待确认", "方向不对口")),
+              one.get("advice"))
+        check("单岗位判定带公司分档", "tier" in (one.get("company_score") or {}))
+        # 与列表同口径：同一个岗位在两处给出的等级必须一致
+        listed = next((i for i in blocked["items"] if i["job_id"] == one["job_id"]), None)
+        check("单岗位与列表判定一致",
+              listed is not None and listed["gate"]["grade"] == one["gate"]["grade"])
+
+        try:
+            get("/api/radar/job/99999999")
+            check("不存在的岗位返回 404", False, "居然 200")
+        except urllib.error.HTTPError as exc:
+            check("不存在的岗位返回 404", exc.code == 404, str(exc.code))
+
     print(f"\n{PASS}/{PASS + FAIL} 通过")
     return 0 if FAIL == 0 else 1
 

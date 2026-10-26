@@ -185,11 +185,18 @@ def clean_jd(text: str) -> str:
             # 标题常常重复两遍（列表卡片 + 详情头部）
             if line in seen_head:
                 continue
+            # 头部最多留 5 行。超出的行不是头部信息，但**也不能丢** ——
+            # 它很可能是「任职要求」之前的岗位职责段落。
+            # 原来这里写的是 head.pop()，等于静默删掉第 6 行之后的全部内容：
+            # 实测一个「职责段落在前、任职要求在后」的 JD，第一次清洗把职责段落
+            # 删掉，第二次清洗又删一遍，同一段文字两次清洗结果不同 —— 幂等性一旦
+            # 破了，任何"重跑清洗"的操作都会持续丢内容，而结果看起来一切正常
+            if len(head) >= 5:
+                in_body = True
+                body.append(line)
+                continue
             seen_head.add(line)
             head.append(line)
-            # 头部最多留 5 行，再往后就不是头部信息了
-            if len(head) > 5:
-                head.pop()
             continue
 
         if _is_stop(line):
