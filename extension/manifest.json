@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "小新求职",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "蜡笔小新陪找工作：打开岗位页自动收录并当场判断你能不能投；盯 HR 回复、按关键词批量找岗。数据只留在本机。",
   "icons": {
     "16": "icon16.png",

@@ -389,6 +389,9 @@ async def handle_message(
     memory_note = ""
     pending_note = ""
     scope_note = ""
+    # 走 chat / clarify 出口的消息不经过检索分支，也要能返回：
+    # 前端和调用方统一读这两个字段，缺了就是另一种 500（收尾处无条件 update）
+    direction_payload = {"direction_hits": None, "intent": ""}
     updates = extract.clean_updates(plan_data.get("profile_updates") or [])
     if updates and _is_search_command(user_text):
         kept = [u for u in updates if u.get("key") not in SEARCH_ONLY_KEYS]
@@ -527,12 +530,19 @@ async def handle_message(
                 title = str((cand_by_id.get(r.job_id) or {}).get("title") or "")
                 return sum(len(f) for f in frags if f in title)
 
+            # 容量动态：方向内一个能投的都没有时（direction_hits==0），这一栏
+            # 就是回复的主角，3 个装不下（库里产品岗有 4 个，实测 86/84/52 挤掉 83）。
+            # 正常情况下方向内能投的岗位已在 fit 栏，blocked 只需 3 个补漏
+            blocked_max = 5 if direction_hits == 0 else 3
             blocked = sorted(
                 (r for r in results if r.decision is Decision.REJECT and _in_direction(r)),
                 key=lambda r: (-_affinity(r), -sims.get(r.job_id, 0.0)),
-            )[:3]
+            )[:blocked_max]
             if blocked:
-                await step(f"另有 {len(blocked)} 个方向对但卡住的岗位")
+                await step(
+                    f"另有 {len(blocked)} 个方向对但卡住的岗位"
+                    + ("（这个方向暂时没有能投的，它们是重点）" if direction_hits == 0 else "")
+                )
 
             # 注意：direction_hits 统计的是 top6 里的方向内岗位（见上面排序处）。
             # 统计整个 passed 的话，39 个候选里 20 个方向内，"6 个里 6 个方向内"
@@ -565,6 +575,9 @@ async def handle_message(
                     # 三栏里的位置。前端据此区分"能投"和"方向对但卡住"，
                     # 不再靠自己猜 decision 的含义
                     "column": "fit",
+                    # 方向全不匹配时，fit 栏里这些是"顺带能投"的方向外岗位。
+                    # 标在卡片上而不是只放回复文本里：历史消息重放时也要能显示
+                    "off_direction": direction_hits == 0 and not _in_direction(r),
                 }
                 for r in top
             ] + [
@@ -585,6 +598,10 @@ async def handle_message(
                 for r in blocked
             ]
             slots["last_job_ids"] = [r.job_id for r in top]
+            # 顶层带上方向命中数与意图：direction_hits==0 时前端要把 blocked 栏
+            # 排到前面，并给 fit 栏的岗位标「不是这个方向」—— 否则用户看到
+            # 一排 Java 岗排在产品岗前面，会以为系统又没听懂
+            direction_payload = {"direction_hits": direction_hits, "intent": intent or ""}
 
     # 写入结果必须说出来。用户被告知"记住了"而库里没变，
     # 比干脆不记更糟 —— 预期被建立起来，之后所有判断都建立在错的前提上。
@@ -605,13 +622,15 @@ async def handle_message(
         conversation_repo.update_slots(conn, conversation_id, slots)
         conn.commit()
 
-    return {
+    out = {
         "conversation_id": conversation_id,
         "reply": reply,
         "jobs": jobs_payload,
         "slots": slots,
         "steps": steps,
     }
+    out.update(direction_payload)
+    return out
 
 
 def _compact(context: dict) -> str:
@@ -680,13 +699,37 @@ async def _compose(
         reasons = [c.detail for c in r.checks if c.decision.value == "reject"]
         return "；".join(reasons[:2]) or "硬约束不符"
 
-    near = "\n".join(f"- {r.title}：{_why(r)}" for r in blocked)
+    def _gap(r) -> str:
+        """缺什么技能。回复里"补什么"建议的原料 —— 没有它，模型只能说"不匹配"，
+        说不出"补了哪几项就能投"，而后者才是用户要的行动指令。"""
+        return "、".join(r.missed_skills[:4]) if r.missed_skills else ""
+
+    near = "\n".join(
+        f"- {r.title}：{_why(r)}" + (f" → 缺的技能：{_gap(r)}" if _gap(r) else "")
+        for r in blocked
+    )
+    # 方向全不匹配时，输出结构完全不同：主角是"差什么、补什么"，
+    # 方向外岗位降级为一句附注 —— 用户问产品，递一排 Java 还配上推荐语气，
+    # 等于告诉他"你想要的没有，随便看看别的吧"
+    if direction_hits == 0 and blocked:
+        structure_note = (
+            "输出结构（严格遵守）：\n"
+            "1. 第一句直说：这个方向暂时没有你能投的岗位，不要铺垫。\n"
+            "2. 主体逐条讲「方向对但投不进」的岗位：卡在哪（城市还是技能）、"
+            "缺哪些具体技能、补了哪一项就能投。这是回复的重点，要占大部分篇幅。\n"
+            "3. 最后最多一句话附注：「另外有几个非这个方向、但你目前能投的岗位"
+            "（列表里标了『不是这个方向』）」—— 语气是'顺带一提'，不许推荐，"
+            "不许展开讲这些岗位的好处。\n"
+        )
+    else:
+        structure_note = ""
     try:
         result = await chat_json(
             REPLY_SYSTEM_PROMPT,
             f"{profile_block}"
             f"{recall_block}\n\n"
             f"用户消息：{user_text}\n意图：{intent}\n使用简历：#{resume_id}\n"
+            f"{structure_note}"
             f"能投的岗位（已按匹配度排序）。其中属于用户这个方向的只有 "
             f"{direction_hits if direction_hits is not None else '?'} 个：\n{summary}\n\n"
             f"方向对、但你现在投不进去的岗位（写明卡在哪；不要推荐去投，"

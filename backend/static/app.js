@@ -1768,6 +1768,10 @@ function renderChatJobs(jobs) {
   if (!jobs || !jobs.length) return '';
   const label = { pass: '通过', confirm: '待确认', reject: '否决' };
   const cls = { pass: 'ok', confirm: 'warn', reject: 'bad' };
+  // 方向全不匹配时：blocked（方向对但投不进）排在最前 —— 它们是回复的主角；
+  // off_direction 的 fit 卡片排到最后。后端排好的顺序在这里保持，不再按原序
+  const rank = (j) => (j.column === 'blocked' ? 0 : j.off_direction ? 2 : 1);
+  jobs = [...jobs].sort((a, b) => rank(a) - rank(b));
   return `<div class="chat-jobs">${jobs.map((j) => {
     // 三栏：fit = 能投；blocked = 方向对但卡住。后者不显示「去投递」——
     // 引导用户去投一个被判定为进不去的岗位，等于让系统自己打自己的脸。
@@ -1779,7 +1783,9 @@ function renderChatJobs(jobs) {
         <span class="job-name-text">${esc(j.title || '未命名岗位')}</span>
         ${isBlocked
           ? `<span class="badge bad">方向对 · 投不进</span>`
-          : `<span class="badge ${cls[j.decision] || ''}">${label[j.decision] || j.decision}</span>`}
+          : j.off_direction
+            ? `<span class="badge warn">不是这个方向 · 能投</span>`
+            : `<span class="badge ${cls[j.decision] || ''}">${label[j.decision] || j.decision}</span>`}
         ${!isBlocked && j.score != null ? `<span class="score">${j.score} 分</span>` : ''}
         ${!isBlocked && j.url ? `<a class="apply-link" href="${cleanJobUrl(j.url)}" target="_blank" rel="noreferrer">去投递 ↗</a>` : ''}
       </div>
@@ -2438,8 +2444,8 @@ async function checkHealth() {
 // 之前把「2026-10-26a · 一键发现 + 消息监控」整行铺在侧栏底部，
 // 看起来像调试输出漏到了界面上；但它确实有用 ——
 // 改完样式后分不清"没生效"和"没刷新"时，靠它一眼确认。
-const APP_VERSION = 'v0.14.0';
-const BUILD_TAG = '2026-10-29a · JD 闸门 + 导出自检';
+const APP_VERSION = 'v0.15.0';
+const BUILD_TAG = '2026-10-29b · 方向不匹配输出结构';
 const buildTagEl = document.getElementById('build-tag');
 if (buildTagEl) {
   buildTagEl.textContent = `${APP_VERSION} · 本地`;

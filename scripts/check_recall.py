@@ -48,6 +48,13 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print(f"[FAIL] {name}{(' — ' + detail) if detail else ''}")
 
 
+def _recall_in_direction(r, meta) -> bool:
+    """与线上 _in_direction 同判据：片段命中标题，或相似度过阈值。"""
+    frags = meta.get("fragments") or []
+    title = str(r.title or "")
+    return any(f in title for f in frags)
+
+
 def main() -> int:
     conn = psycopg.connect(DSN)
     jobs = match_repo.list_current_job_profiles(conn)
@@ -147,6 +154,22 @@ def main() -> int:
         if blocked:
             reasons = " ".join(c.detail for c in blocked[0].checks if c.decision.value == "reject")
             check("卡点写的是人话（含城市或技能）", ("城市" in reasons or "技能" in reasons), reasons[:60])
+
+    print("\n== 方向全不匹配时的输出结构 ==")
+    # 用户要求的行为：方向内全投不进时，回复主体是「差什么、补什么」，
+    # 方向外岗位降级为附注。这三条断言钉住这个契约
+    agent_src = (ROOT / "backend" / "app" / "chat" / "agent.py").read_text(encoding="utf-8")
+    check("blocked 容量随方向命中动态调整", "blocked_max = 5 if direction_hits == 0 else 3" in agent_src)
+    check("fit 卡片带 off_direction 标记", '"off_direction": direction_hits == 0 and not _in_direction(r)' in agent_src)
+    check("回复结构指令存在（第一句直说/主体讲缺口/附注降级）",
+          all(k in agent_src for k in ("第一句直说", "补了哪一项就能投", "不许推荐")))
+    check("卡点带缺什么技能（补什么的原料）", "_gap(r)" in agent_src and "missed_skills" in agent_src)
+
+    # 真实数据验证：产品意图下 direction_hits==0 时 blocked 应能装下库里全部产品岗
+    sel, meta = _recall_candidates("产品经理", [], jobs)
+    res = rank(profile, sel, _prefs_from_profile({"job_nature": "实习", "accept_outsourcing": False, "cities": ["广州", "深圳"]}, []), {})
+    prods = [r for r in res if r.decision is Decision.REJECT and _recall_in_direction(r, meta)]
+    check(f"产品岗 REJECT 的有 {len(prods)} 个（应 >= 3，blocked_max=5 要装得下）", len(prods) >= 3)
 
     print("\n== 边界 ==")
     check("空意图不崩", _recall_candidates("", [], jobs)[1]["total"] == len(jobs))
