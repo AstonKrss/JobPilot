@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 
 from ..db.pool import get_pool
 from ..db import repo
+from ..ingest.docx_text import extract_docx_blocks
+from ..rewrite.ats_check import check_docx
 from ..rewrite.tailor import TAILOR_DIR, tailor_for_job
 
 logger = logging.getLogger(__name__)
@@ -59,3 +61,29 @@ async def download_tailored(resume_id: int, job_id: int) -> FileResponse:
         filename=f"{stem}-定制版.docx",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+
+
+@router.get("/{resume_id}/tailored/{job_id}/check")
+async def check_tailored(resume_id: int, job_id: int) -> dict:
+    """单独复查一份已生成的定制简历。
+
+    生成时会顺带跑一次，这个接口的价值在"之后又查一次"：
+    用户可能在 Word 里又改过再重新上传同名文件，或者想知道
+    "指标现在怎么样了"。所以不读库里的旧结论，直接读磁盘上的文件重算。
+    """
+    path = TAILOR_DIR / f"resume{resume_id}-job{job_id}.docx"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="还没有生成过这份定制简历")
+    with get_pool().connection() as conn:
+        detail = repo.get_resume_detail(conn, resume_id)
+        job = repo.get_job_profile(conn, job_id) or {}
+    basic = ((detail or {}).get("profile") or {}).get("basic") or {}
+    blocks, _ = extract_docx_blocks(path)
+    ctx = {
+        **job,
+        "_name": basic.get("name"),
+        "_school": basic.get("school"),
+        "_email": basic.get("email"),
+        "_phone": basic.get("phone"),
+    }
+    return check_docx(path, blocks, job=ctx, basic=basic)

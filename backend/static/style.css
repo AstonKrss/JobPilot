@@ -1468,3 +1468,154 @@ button.danger:hover:not(:disabled) { background: var(--danger-weak); }
   background: #ececf1;
   color: var(--text);
 }
+
+/* ---------- JD 完整性提示 ----------
+   这条提示只出现在真的检出问题时。措辞刻意不用"风险""中毒"这类词：
+   绝大多数情况是编辑器插进来的零宽字符，让用户以为被攻击了只会制造焦虑。
+   真正该提醒的是"这里有一行话是写给模型看的"，所以把原文引用出来。 */
+.jd-warn {
+  margin-top: 8px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  border-left: 3px solid var(--warn);
+  background: var(--warn-weak);
+  font-size: 12px;
+  color: #8a5200;
+  line-height: 1.6;
+}
+.jd-warn-quote {
+  margin-top: 4px;
+  color: #a35f00;
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+/* ---------- 导出文件自检 ---------- */
+.ats-box {
+  margin: 12px 0 4px;
+  padding: 12px 14px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--line);
+  background: #fbfbfd;
+}
+.ats-box.warn { border-color: #f0d9a8; background: #fffdf7; }
+.ats-box.bad { border-color: #f3c2bd; background: #fffafa; }
+
+.ats-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.ats-head b { font-size: 13px; color: var(--text); font-weight: 650; }
+
+.ats-list { list-style: none; margin: 0; padding: 0; }
+.ats-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  border-top: 1px solid rgba(0, 0, 0, .04);
+}
+.ats-row:first-child { border-top: 0; }
+.ats-row b { flex: none; font-weight: 600; color: var(--text); }
+.ats-detail { color: var(--muted); }
+
+/* 状态用窄色块而不是勾叉图标：勾叉在 12px 下看不清，还会和技能 chip 混淆 */
+.ats-tag {
+  flex: none;
+  min-width: 34px;
+  text-align: center;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: #f1f2f5;
+  color: var(--faint);
+}
+.ats-tag.ok { background: var(--ok-weak); color: #1c7a3d; }
+.ats-tag.warn { background: var(--warn-weak); color: #a35f00; }
+.ats-tag.bad { background: var(--danger-weak); color: #b3261e; }
+
+.ats-note {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--faint);
+  line-height: 1.6;
+}
+
+.ats-cut { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line-strong); }
+.ats-cut-note { margin: 4px 0 8px; font-size: 11.5px; color: var(--faint); line-height: 1.6; }
+.ats-cut-row { display: flex; gap: 9px; padding: 5px 0; font-size: 12.5px; line-height: 1.55; }
+.ats-cut-idx {
+  flex: none;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: #ececf1;
+  color: var(--muted);
+  font-size: 11px;
+  display: grid; place-items: center;
+  margin-top: 1px;
+}
+.ats-cut-text { color: var(--text); }
+.ats-cut-why { color: var(--faint); font-size: 11.5px; margin-top: 2px; }
+
+/* ---------- 投递之后 ---------- */
+.follow-list { display: flex; flex-direction: column; }
+.follow-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.follow-row:first-child { border-top: 0; padding-top: 0; }
+.follow-main { flex: 1; min-width: 0; }
+.follow-title { font-size: 13.5px; font-weight: 600; }
+.follow-meta { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+.follow-meta b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.cal-box {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--line);
+  background: #fbfbfd;
+}
+.cal-box.bad { border-color: #f3c2bd; background: #fffafa; }
+.cal-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.cal-head b { font-size: 13px; color: var(--text); font-weight: 650; }
+
+/* 横条代替百分比数字：十几家样本下的"33%"会让人误以为精确，
+   条越长越多是能直接看出来的，读不出精确感 */
+.cal-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 12.5px; }
+.cal-label { flex: none; width: 68px; color: var(--muted); }
+.cal-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: #ecedf2;
+  overflow: hidden;
+}
+.cal-bar i { display: block; height: 100%; background: var(--primary-grad); border-radius: 3px; }
+.cal-num { flex: none; width: 106px; text-align: right; color: var(--faint); font-size: 11.5px; }
+
+.cal-verdict { margin: 10px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--text); }
+.cal-verdict.bad { color: #b3261e; }
+.cal-verdict.ok { color: #1c7a3d; }
+.cal-note { margin: 6px 0 0; font-size: 11.5px; color: var(--faint); line-height: 1.6; }
+
+@media (max-width: 720px) {
+  .cal-num { width: 84px; }
+  .ats-row { flex-wrap: wrap; }
+}

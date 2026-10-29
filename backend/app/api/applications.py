@@ -104,6 +104,41 @@ async def get_stats() -> dict:
     }
 
 
+@router.get("/followups")
+async def list_followups(days: int = repo.FOLLOWUP_DAYS) -> dict:
+    """投出去 N 天没有任何动静的岗位。
+
+    这是「投完就失忆」的兜底：用户不会数日子，系统替他数。
+    默认 10 天，可传参 —— 有人习惯一周一催。
+    """
+    if days < 1:
+        raise HTTPException(status_code=400, detail="days 至少为 1")
+    with get_pool().connection() as conn:
+        items = repo.get_followups(conn, days)
+    return {
+        "days": days,
+        "count": len(items),
+        "items": items,
+        "hint": (
+            "这些岗位投出去后没有任何 HR 消息。先看一眼工作台里的沟通记录再决定要不要问 —— "
+            "有些岗位确实不回复，催一次没有损失"
+        )
+        if items
+        else None,
+    }
+
+
+@router.get("/calibration")
+def reply_calibration(resume_id: int | None = None) -> dict:
+    """用真实的回复情况反过来看打分准不准。
+
+    不返回"准确率"这种词：这里的样本量天然很小，能说的只有
+    "哪一档的回复更多"，以及样本不够时直说不够。
+    """
+    with get_pool().connection() as conn:
+        return repo.get_reply_calibration(conn, resume_id)
+
+
 @router.get("/{app_id}")
 async def get_application(app_id: int) -> dict:
     with get_pool().connection() as conn:

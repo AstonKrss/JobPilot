@@ -1244,14 +1244,18 @@
    *
    * 判定失败不影响入库结果，所以静默 —— 这只是附加信息，不该盖掉"已收录"。
    */
-  async function showVerdict(jobId) {
+  async function showVerdict(jobId, integrity) {
     try {
       const v = await callApi(`/api/radar/job/${jobId}`, 'GET');
       if (!v || !v.advice) return;
       const kind = v.gate.grade === 'blocked' ? 'err'
         : v.gate.grade === 'reachable' ? 'ok' : '';
       const tier = v.company_score ? ` · ${v.company_score.tier}` : '';
-      say(`${v.advice}${tier}`, kind);
+      // JD 里有可疑内容时，警告要排在判定前面：判定说的是"值不值得投"，
+      // 而可疑内容说的是"这份 JD 可能不是写给你看的"，
+      // 后者的优先级更高 —— 一条被污染的 JD 抽出来的岗位要求本来就不该信
+      const warn = integrity && integrity.level === 'warn' ? `⚠ ${integrity.summary} · ` : '';
+      say(`${warn}${v.advice}${tier}`, warn ? 'err' : kind);
     } catch {
       /* 判定是附加信息，失败就保留"已收录"那条 */
     }
@@ -1376,7 +1380,7 @@
       markIngested(key);
       if (!batchBusy) {
         say(`已自动收录 #${res.job_id} ${name}（共 ${autoCount} 个）`, 'ok');
-        if (res.job_id) showVerdict(res.job_id);
+        if (res.job_id) showVerdict(res.job_id, res.integrity);
       }
     } catch (err) {
       if (isInvalidated(err.message)) {

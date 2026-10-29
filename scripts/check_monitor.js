@@ -283,8 +283,15 @@ function sendTo(listeners, msg) {
     } else {
       bad('列表页会随浏览自动收录当前页');
     }
-    if (/showVerdict\(res\.job_id\)/.test(content)) ok('详情页收录后立刻拉取雷达判定');
-    else bad('详情页收录后立刻拉取雷达判定');
+    if (/showVerdict\(res\.job_id, res\.integrity\)/.test(content)) {
+      ok('详情页收录后立刻拉取雷达判定');
+    } else {
+      bad('详情页收录后立刻拉取雷达判定');
+    }
+    // 入库结果里的 integrity 要一路传到面板上：JD 里查出的可疑内容，
+    // 用户必须在"当场判定"那一行就能看到，而不是等去岗位页翻
+    if (/integrity\.level === 'warn'/.test(content)) ok('可疑 JD 的警告会显示在面板上');
+    else bad('可疑 JD 的警告会显示在面板上');
     if (/AUTO_LIST_MAX_TRIES/.test(content) && /autoListTries/.test(content)) {
       ok('卡片还没渲染时不会把这一页永久跳过');
     } else {

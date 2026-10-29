@@ -360,6 +360,7 @@ async def tailor_for_job(
             # 两种都是有效结论，前端按"没有可改的地方"展示，不弹红字。
             "note": _zero_note(gaps, rejected),
             "gaps": gaps,
+            "ats": _ats_report(saved, job, basic),
             "cost_cny": round(result.cost_cny, 4),
         }
 
@@ -380,9 +381,39 @@ async def tailor_for_job(
         "summary": summary,
         "file_name": saved.name,
         "download_url": f"/api/resumes/{resume_id}/tailored/{job_id}/file",
+        "ats": _ats_report(saved, job, basic),
         "cost_cny": round(result.cost_cny, 4),
         "gaps": gaps,
     }
+
+
+def _ats_report(path, job: dict, basic: dict) -> dict:
+    """对刚导出的文件跑一遍可读性检查。
+
+    为什么在生成时就跑，而不是等用户自己点：这份文件是我们产出的，
+    "它能不能被机器读出来"和"改得对不对"是同一件事的两个方面。
+    等用户下载完再发现问题，他已经投出去了。
+
+    检查失败不影响交付：文件照常给，结论附在 ats 字段里由界面展示。
+    """
+    from ..ingest.docx_text import extract_docx_blocks
+
+    from .ats_check import check_docx
+
+    try:
+        blocks, _ = extract_docx_blocks(path)
+        ctx = {
+            **job,
+            "_name": basic.get("name"),
+            "_school": basic.get("school"),
+            "_email": basic.get("email"),
+            "_phone": basic.get("phone"),
+        }
+        return check_docx(path, blocks, job=ctx, basic=basic)
+    except Exception as exc:  # noqa: BLE001
+        # 报告是附加信息，不能让它把已经生成好的文件变成一次失败
+        logger.warning("可读性检查失败（不影响交付）：%s", exc)
+        return {"level": "unknown", "checks": [], "error": str(exc)}
 
 
 def _outline_json(outline: list[dict]) -> str:

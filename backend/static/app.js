@@ -98,6 +98,19 @@ function activateView(name) {
   });
 }
 
+/**
+ * 进入「发现」页要拉的三份数据。
+ *
+ * 抽成函数而不是两处各写一遍：这个页面有两条进入路径（点击侧栏、刷新时按 hash
+ * 恢复），之前两条各写各的，加「投递之后」面板时只改了其中一条，
+ * 刷新进来就是空白 —— 而且不报错，看起来像后端没数据。
+ */
+function enterRadar() {
+  loadRadar();
+  loadRadarPlan();
+  loadAfterPanel();
+}
+
 document.querySelectorAll('.tab').forEach((tab) => {
   tab.addEventListener('click', () => {
     activateView(tab.dataset.view);
@@ -107,10 +120,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
       fillWorkbenchSelects();
       loadWorkbenchStats();
     }
-    if (tab.dataset.view === 'radar') {
-      loadRadar();
-      loadRadarPlan();
-    }
+    if (tab.dataset.view === 'radar') enterRadar();
   });
 });
 
@@ -438,6 +448,7 @@ function renderTailor(box, data) {
           : ''}
       </div>
       <p class="tailor-note"${originWarn ? ' style="color:var(--danger)"' : ''}>${esc(originNote)}${data.summary ? ' · ' + esc(data.summary) : ''}</p>
+      ${renderAts(data.ats)}
       ${data.hintTotal && data.accepted < data.hintTotal ? `
         <p class="tailor-note" style="color:var(--text-2)">
           诊断共 ${data.hintTotal} 条，本次自动应用 ${data.accepted} 处。其余涉及时间线、项目名、期望城市、经历缺失，
@@ -572,9 +583,14 @@ function renderJobs() {
                 ${j.city ? `<span class="badge">${esc(j.city)}</span>` : ''}
                 ${j.detail_level === 'full' ? '<span class="badge ok">完整 JD</span>'
                   : j.detail_level === 'digest' ? '<span class="badge warn">仅摘要</span>' : ''}
+                ${j.integrity ? `<span class="badge bad" title="${esc(j.integrity.summary || '')}">JD 有可疑内容</span>` : ''}
                 ${scoreTag}
               </div>
               <div class="item-meta">${esc(exp)} · #${j.id}${j.url ? ' · <a class="jd-link" href="' + esc(j.url) + '" target="_blank" rel="noreferrer">原站链接 ↗</a>' : ''}</div>
+              ${j.integrity ? `<div class="jd-warn">${esc(j.integrity.summary || '')}${
+                (j.integrity.instruction_like || [])[0]
+                  ? `<div class="jd-warn-quote">「${esc(j.integrity.instruction_like[0])}」</div>` : ''
+              }</div>` : ''}
               ${must.length
                 ? `<div class="chips" style="margin-top:6px">${chips}${more}</div>`
                 : `<div class="item-meta" style="margin-top:6px;color:var(--faint)">未列出必备技能</div>`}
@@ -2259,6 +2275,131 @@ document.getElementById('btn-radar-refresh')?.addEventListener('click', () => {
   loadRadar();
 });
 
+/* ---------- 导出文件自检（ATS） ----------
+   这份检查回答的是"招聘系统能不能读出来"，不是"写得好不好"。
+   所以每一项都必须给出具体成因（邮箱读不到 / 日期用了长横线），
+   而不是打一个分 —— 打分没法指导下一步动作。 */
+
+const ATS_TAG = {
+  pass: ['ok', '通过'],
+  warn: ['warn', '注意'],
+  fail: ['bad', '未通过'],
+  skip: ['', '跳过'],
+};
+
+function renderAts(ats) {
+  if (!ats || !(ats.checks || []).length) return '';
+  const c = ats.counts || {};
+  const cut = ats.cut_candidates || [];
+  const tone = c.fail ? 'bad' : c.warn ? 'warn' : 'ok';
+  const head = [
+    `${c.pass || 0} 项通过`,
+    c.warn ? `${c.warn} 项注意` : '',
+    c.fail ? `${c.fail} 项未通过` : '',
+  ].filter(Boolean).join(' · ');
+
+  return `
+    <div class="ats-box ${tone}">
+      <div class="ats-head">
+        <b>导出文件自检</b>
+        <span>${head}</span>
+      </div>
+      <ul class="ats-list">
+        ${(ats.checks || []).map((k) => {
+          const tag = ATS_TAG[k.level] || ['', ''];
+          return `<li class="ats-row">
+            <span class="ats-tag ${tag[0]}">${tag[1]}</span>
+            <b>${esc(k.title)}</b>
+            <span class="ats-detail">${esc(k.detail)}</span>
+          </li>`;
+        }).join('')}
+      </ul>
+      ${cut.length ? `
+        <div class="ats-cut">
+          <div class="sec-title">预计超过两页 — 按"删了损失最小"排的前 ${cut.length} 段</div>
+          <p class="ats-cut-note">按板块顺序从最旧的经历砍会删错：一条旧经历如果命中岗位关键词，
+            比一条新的、但没提到任何要求的更该留。所以这里按"与岗位的相关性 + 是否与别处重复"排。</p>
+          ${cut.map((x, i) => `<div class="ats-cut-row">
+            <span class="ats-cut-idx">${i + 1}</span>
+            <div><div class="ats-cut-text">${esc(x.text)}</div>
+            <div class="ats-cut-why">${esc(x.why)}</div></div>
+          </div>`).join('')}
+        </div>` : ''}
+      <p class="ats-note">检查的是这份导出的文件，不是原简历。改完在 Word 里再存一次后，可以重新点开确认。</p>
+    </div>`;
+}
+
+/* ---------- 投递之后：该催谁 + 分数准不准 ---------- */
+
+async function loadAfterPanel() {
+  const box = document.getElementById('radar-followups');
+  const cal = document.getElementById('radar-calibration');
+  const cnt = document.getElementById('radar-after-count');
+  if (!box) return;
+  if (cnt) cnt.textContent = '加载中…';
+  try {
+    const [f, c] = await Promise.all([
+      api('/api/applications/followups'),
+      api('/api/applications/calibration'),
+    ]);
+    box.innerHTML = renderFollowups(f);
+    if (cal) cal.innerHTML = renderCalibration(c);
+    if (cnt) cnt.textContent = f.count ? `${f.count} 个该催` : '';
+  } catch (err) {
+    box.innerHTML = `<div class="empty">加载失败：${esc(err.message || err)}</div>`;
+    if (cnt) cnt.textContent = '';
+  }
+}
+
+function renderFollowups(d) {
+  const items = d.items || [];
+  if (!items.length) {
+    return `<div class="empty">没有需要催的岗位。投出去 ${d.days || 10} 天还没有任何 HR 消息时，这里会列出来。</div>`;
+  }
+  return `
+    <div class="follow-list">
+      ${items.map((x) => `
+        <div class="follow-row">
+          <div class="follow-main">
+            <div class="follow-title">${esc(x.title || '未命名岗位')}${x.company ? ` · ${esc(x.company)}` : ''}</div>
+            <div class="follow-meta">已等 <b>${x.quiet_days}</b> 天 · ${
+              x.never_replied ? '对方一句话都没回' : '聊过之后就没动静了'
+            }${x.url ? ` · <a class="jd-link" href="${esc(x.url)}" target="_blank" rel="noreferrer">原站 ↗</a>` : ''}</div>
+          </div>
+          <button class="small" data-workbench="${x.job_id}">看看记录</button>
+        </div>`).join('')}
+    </div>
+    ${d.hint ? `<p class="hint" style="margin-top:10px">${esc(d.hint)}</p>` : ''}`;
+}
+
+function renderCalibration(d) {
+  const v = d.verdict || {};
+  const buckets = d.buckets || [];
+  const tone = v.level === 'bad' ? 'bad' : v.level === 'ok' ? 'ok' : '';
+  if (!d.total_applied) {
+    return `<div class="cal-box">
+      <div class="cal-head"><b>打分准不准</b><span>还没有投递记录</span></div>
+      <p class="cal-note">这里会把"当时给的分数"和"后来有没有回音"放在一起看。要它有意义，得先真的投几家，
+        并且让扩展把 HR 的回复同步进来。</p>
+    </div>`;
+  }
+  const rows = buckets.map((b) => {
+    const rate = b.rate == null ? null : Math.round(b.rate * 100);
+    return `<div class="cal-row">
+      <span class="cal-label">${esc(b.label)}</span>
+      <div class="cal-bar"><i style="width:${rate == null ? 0 : Math.max(rate, 2)}%"></i></div>
+      <span class="cal-num">${b.enough ? `${b.replied}/${b.applied} 有回音` : b.applied ? `${b.applied} 家（样本不足）` : '—'}</span>
+    </div>`;
+  }).join('');
+
+  return `<div class="cal-box ${tone}">
+    <div class="cal-head"><b>打分准不准</b><span>${d.matched} 个岗位有可对照的分数</span></div>
+    ${rows}
+    <p class="cal-verdict ${tone}">${esc(v.text || '')}</p>
+    <p class="cal-note">${esc(d.note || '')}</p>
+  </div>`;
+}
+
 async function checkHealth() {
   const node = document.getElementById('health');
   try {
@@ -2287,8 +2428,8 @@ async function checkHealth() {
 // 之前把「2026-10-26a · 一键发现 + 消息监控」整行铺在侧栏底部，
 // 看起来像调试输出漏到了界面上；但它确实有用 ——
 // 改完样式后分不清"没生效"和"没刷新"时，靠它一眼确认。
-const APP_VERSION = 'v0.13.0';
-const BUILD_TAG = '2026-10-26d · 小新立绘图标';
+const APP_VERSION = 'v0.14.0';
+const BUILD_TAG = '2026-10-29a · JD 闸门 + 导出自检';
 const buildTagEl = document.getElementById('build-tag');
 if (buildTagEl) {
   buildTagEl.textContent = `${APP_VERSION} · 本地`;
@@ -2326,10 +2467,7 @@ checkHealth();
 // 而且控制台没有任何提示，完全查不出来。
 const initialView = (location.hash || '').replace('#', '');
 if (initialView) activateView(initialView);
-if (initialView === 'radar') {
-  loadRadar();
-  loadRadarPlan();
-}
+if (initialView === 'radar') enterRadar();
 
 loadResumes().then(fillWorkbenchSelects).catch(() => {});
 loadJobs()

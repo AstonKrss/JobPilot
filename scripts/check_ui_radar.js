@@ -129,6 +129,34 @@ const PLAN = {
   tips: ['先切成「最新」'],
 };
 
+// 「投递之后」面板的两份真实结构。这一块的风险和前两页一样：
+// 后端字段一改，界面会静默渲染成空，不该靠肉眼发现
+const FOLLOWUPS = {
+  days: 10,
+  count: 2,
+  hint: '先看一眼沟通记录再决定要不要问',
+  items: [
+    { job_id: 12, title: 'Java 后端开发实习生', company: '美云智数', quiet_days: 14,
+      never_replied: true, url: 'https://www.zhipin.com/job_detail/1.html', source: 'boss' },
+    { job_id: 33, title: '软件开发工程师', company: '库卡', quiet_days: 11,
+      never_replied: false, url: null, source: 'liepin' },
+  ],
+};
+
+const CALIBRATION = {
+  resume_id: 6,
+  total_applied: 8,
+  matched: 6,
+  buckets: [
+    { key: 'lt60', label: '60 分以下', lo: 0, hi: 60, applied: 0, replied: 0, rate: null, enough: false },
+    { key: '60s', label: '60–69', lo: 60, hi: 70, applied: 1, replied: 0, rate: null, enough: false },
+    { key: '70s', label: '70–79', lo: 70, hi: 80, applied: 3, replied: 1, rate: 0.33, enough: true },
+    { key: '80p', label: '80 分以上', lo: 80, hi: 101, applied: 2, replied: 2, rate: 1.0, enough: false },
+  ],
+  verdict: { level: 'unknown', text: '样本还不够分档看趋势（每档至少 3 个才给结论），再投几家' },
+  note: '只统计有匹配分数记录的岗位',
+};
+
 function boot() {
   const html = fs
     .readFileSync(path.join(STATIC, 'index.html'), 'utf8')
@@ -150,6 +178,8 @@ function boot() {
     let data = { count: 0, items: [] };
     if (u.includes('/api/radar/plan')) data = PLAN;
     else if (u.includes('/api/radar')) data = RADAR;
+    else if (u.includes('/api/applications/followups')) data = FOLLOWUPS;
+    else if (u.includes('/api/applications/calibration')) data = CALIBRATION;
     return { ok: true, status: 200, text: async () => JSON.stringify(data) };
   };
   w.navigator.clipboard = { writeText: async () => {} };
@@ -237,6 +267,65 @@ function boot() {
   await sleep(60);
   if (!errors.length) ok('点击关键词复制不抛错');
   else bad('点击关键词复制不抛错', errors.slice(0, 2).join(' | '));
+
+  // 投递之后：该催谁
+  if (doc.querySelectorAll('.follow-row').length === 2) ok('该催列表渲染出 2 条');
+  else bad('该催列表渲染出 2 条', String(doc.querySelectorAll('.follow-row').length));
+
+  if (text('#radar-followups').includes('已等')) ok('等待天数有显示');
+  else bad('等待天数有显示');
+
+  if (text('#radar-followups').includes('对方一句话都没回')
+      && text('#radar-followups').includes('聊过之后就没动静了')) {
+    ok('从没回过 / 聊过又断了 分开表述');
+  } else {
+    bad('从没回过 / 聊过又断了 分开表述');
+  }
+
+  if (doc.querySelector('#radar-followups [data-workbench="12"]')) ok('该催项能直接跳到工作台');
+  else bad('该催项能直接跳到工作台');
+
+  if (text('#radar-after-count').includes('2 个该催')) ok('面板头显示待催数量');
+  else bad('面板头显示待催数量', text('#radar-after-count'));
+
+  // 打分准不准
+  if (doc.querySelectorAll('.cal-row').length === 4) ok('分数分档渲染 4 行');
+  else bad('分数分档渲染 4 行', String(doc.querySelectorAll('.cal-row').length));
+
+  if (text('#radar-calibration').includes('样本不足')) ok('样本不足的档不给比率');
+  else bad('样本不足的档不给比率');
+
+  if (text('#radar-calibration').includes('1/3 有回音')) ok('样本够的档给出比例');
+  else bad('样本够的档给出比例', text('#radar-calibration').slice(0, 60));
+
+  if (text('#radar-calibration').includes('再投几家')) ok('结论文案渲染');
+  else bad('结论文案渲染');
+
+  if (!text('#radar-calibration').includes('NaN')) ok('分数条没有 NaN 宽度');
+  else bad('分数条没有 NaN 宽度');
+
+  // 导出文件自检
+  {
+    const host = doc.createElement('div');
+    host.innerHTML = w.renderAts({
+      level: 'warn',
+      counts: { pass: 4, warn: 1, fail: 0 },
+      checks: [
+        { key: 'text_layer', level: 'pass', title: '文本可抽取', detail: '1774 个字符' },
+        { key: 'contact', level: 'fail', title: '邮箱读不出来', detail: 'zhangsan@example.com 找不到' },
+      ],
+      cut_candidates: [{ text: '负责日常行政事务', why: '没提到任何岗位要求', score: 0.2 }],
+    });
+    const html = host.innerHTML;
+    if (html.includes('导出文件自检') && html.includes('4 项通过')) ok('自检块渲染计数');
+    else bad('自检块渲染计数', html.slice(0, 80));
+    if (html.includes('邮箱读不出来') && html.includes('ats-tag bad')) ok('未通过项用了红色标记');
+    else bad('未通过项用了红色标记');
+    if (html.includes('ats-cut') && html.includes('没提到任何岗位要求')) ok('裁剪候选与理由渲染');
+    else bad('裁剪候选与理由渲染');
+    if (!html.includes('undefined')) ok('自检块没有 undefined');
+    else bad('自检块没有 undefined');
+  }
 
   console.log(`\n${pass}/${pass + fail} 通过`);
   process.exit(fail === 0 ? 0 : 1);

@@ -10,6 +10,8 @@ import hashlib
 import logging
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 import psycopg
 
 from ..ingest.layout import Block
@@ -403,7 +405,7 @@ def list_jobs(
         SELECT j.id, j.source, j.url, p.title, p.company, p.city, p.job_nature,
                p.edu_level, p.exp_min, p.exp_max, p.must_have_skills,
                p.nice_to_have_skills, j.created_at, j.detail_level,
-               p.graduate_years
+               p.graduate_years, j.integrity
           FROM job j
           LEFT JOIN job_profile p ON p.job_id = j.id AND p.is_current
     """
@@ -436,6 +438,9 @@ def list_jobs(
             "created_at": r[12].isoformat() if r[12] else None,
             "detail_level": r[13] or "unknown",
             "graduate_years": r[14] or [],
+            # 完整性结论只在真的有问题时下发，空的就不占字段 ——
+            # 前端少一个判断，列表里也不会每条都挂一个空对象
+            "integrity": (r[15] or None) if (r[15] or {}).get("level") in ("warn", "context") else None,
             "has_profile": r[3] is not None,
         }
         for r in rows
@@ -450,6 +455,11 @@ def count_jobs_by_source(conn: psycopg.Connection) -> dict[str, int]:
     return {str(r[0] or "unknown"): int(r[1]) for r in rows}
 
 
+def _jsonb(value) -> psycopg.types.json.Jsonb:
+    """统一包 Jsonb。psycopg 对 dict 不会自动转，漏一处就是 TypeError。"""
+    return psycopg.types.json.Jsonb(value)
+
+
 def create_job(
     conn: psycopg.Connection,
     *,
@@ -460,6 +470,7 @@ def create_job(
     url: str | None = None,
     source_job_id: str | None = None,
     detail_level: str = "unknown",
+    integrity: dict | None = None,
 ) -> tuple[int, bool]:
     """同源同 ID 已存在则更新原文，返回 (id, 是否新增)。
 
@@ -487,21 +498,28 @@ def create_job(
                                    WHEN %s = 'full' THEN 'full'
                                    ELSE detail_level
                                END,
+                               -- 完整性结论跟着新文本走。不更新的话，
+                               -- 同一个岗位先被列表页（摘要）覆盖过、
+                               -- 再被详情页（完整）覆盖，留下的还是摘要那次的结论
+                               integrity = CASE WHEN %s::jsonb = '{}'::jsonb
+                                                THEN integrity ELSE %s::jsonb END,
                                fetched_at = now()
                  WHERE id = %s
                 """,
-                (raw_text, raw_text_original, raw_html, url, detail_level, row[0]),
+                (raw_text, raw_text_original, raw_html, url, detail_level,
+                 _jsonb(integrity or {}), _jsonb(integrity or {}), row[0]),
             )
             return int(row[0]), False
 
     row = conn.execute(
         """
         INSERT INTO job (source, source_job_id, url, raw_html, raw_text,
-                         raw_text_original, fetched_at, detail_level)
-        VALUES (%s, %s, %s, %s, %s, %s, now(), %s)
+                         raw_text_original, fetched_at, detail_level, integrity)
+        VALUES (%s, %s, %s, %s, %s, %s, now(), %s, %s)
         RETURNING id
         """,
-        (source, source_job_id, url, raw_html, raw_text, raw_text_original, detail_level),
+        (source, source_job_id, url, raw_html, raw_text, raw_text_original,
+         detail_level, _jsonb(integrity or {})),
     ).fetchone()
     assert row is not None
     return int(row[0]), True
@@ -825,3 +843,190 @@ def add_resume_skill(
     )
     conn.commit()
     return {"added": True, "skills": skills}
+
+# ---------------------------------------------------------------------------
+# 投递后的两件事：该催谁、打分到底准不准
+# ---------------------------------------------------------------------------
+
+# 多少天没回音就该主动问一句。
+# 定 10 天而不是 7：HR 处理一批简历常在第二周，第七天催容易显得急，
+# 也给对方一个"还没看完"的空间。这是经验值，所以做成参数可传。
+FOLLOWUP_DAYS = 10
+
+
+def get_followups(conn: psycopg.Connection, days: int = FOLLOWUP_DAYS) -> list[dict]:
+    """已投、超过 N 天没有任何 HR 消息的岗位。
+
+    为什么要单独算而不是"按时间排序让用户自己看"：
+        "投完就失忆"是这个产品要解决的第三个问题。用户不会去翻投递列表
+        数日子，但"三天前就该催的两家"是他一看就会动手的东西。
+
+    判据里同时看两个时间：
+        a.updated_at —— 标记已投的时间
+        last_hr      —— 该岗位最近一条 HR 消息
+        取较晚的那个作为"最后一次有动静"。只看 updated_at 的话，
+        聊得正热但没更新状态的岗位会被误报成该催了。
+    """
+    rows = conn.execute(
+        """
+        SELECT a.job_id, a.updated_at,
+               p.title, p.company, j.source, j.url,
+               (SELECT max(cl.synced_at) FROM chat_log cl
+                 WHERE cl.job_id = a.job_id AND cl.role = 'HR') AS last_hr
+          FROM application a
+          JOIN job j ON j.id = a.job_id
+          LEFT JOIN job_profile p ON p.job_id = a.job_id AND p.is_current
+         WHERE a.status = 'applied'
+         ORDER BY a.updated_at ASC
+        """
+    ).fetchall()
+
+    now = datetime.now(timezone.utc)
+    out: list[dict] = []
+    for job_id, applied_at, title, company, source, url, last_hr in rows:
+        if applied_at is None:
+            continue
+        # 两个时间取晚的那个：聊过也算"有动静"
+        latest = max([t for t in (applied_at, last_hr) if t is not None])
+        quiet = (now - latest).days
+        if quiet < days:
+            continue
+        out.append(
+            {
+                "job_id": int(job_id),
+                "title": title,
+                "company": company,
+                "source": source,
+                "url": url,
+                "applied_at": applied_at.isoformat(),
+                "last_hr_at": last_hr.isoformat() if last_hr else None,
+                "quiet_days": quiet,
+                # 从没回过 vs 聊过又断了，催的话术不一样，所以分开标
+                "never_replied": last_hr is None,
+            }
+        )
+    out.sort(key=lambda x: -x["quiet_days"])
+    return out
+
+
+def get_reply_calibration(conn: psycopg.Connection, resume_id: int | None = None) -> dict:
+    """把「预测分」和「真实有没有回音」放在一起看。
+
+    这是 README 里第一条已知限制（"打分没有校准基准"）的正面回答：
+    真要判断分数准不准，唯一的路是拿投递结果反过来验证，而不是再调一次权重。
+
+    做法
+        取最近一次匹配快照里每个岗位的分数（那是用户做决定时看到的分），
+        和该岗位有没有 HR 回音配成对，按分数分档统计。
+        只统计有分数记录的岗位 —— 后来才入库的岗位没有"当时的预测"，
+        拿现在的分数去对过去的决定是自欺。
+
+    为什么分档而不是算相关系数
+        十几个样本算出来的相关系数没有意义（正负 0.3 都在噪音里），
+        而"80 分以上的 5 家里回了 3 家，60 分以下的 4 家一家没回"
+        这句话人一眼能判断。结论要能被人用，不是能被人引用。
+    """
+    rid = resume_id or get_default_resume_id(conn)
+    if not rid:
+        return {"buckets": [], "total_applied": 0, "note": "还没有主简历"}
+
+    row = conn.execute(
+        """
+        SELECT payload FROM match_run
+         WHERE resume_id = %s
+         ORDER BY created_at DESC LIMIT 1
+        """,
+        (rid,),
+    ).fetchone()
+    scores: dict[int, float] = {}
+    if row and isinstance(row[0], dict):
+        for item in row[0].get("items") or []:
+            if item.get("job_id") is not None and item.get("score") is not None:
+                scores[int(item["job_id"])] = float(item["score"])
+
+    applied = conn.execute(
+        """
+        SELECT a.job_id,
+               EXISTS (SELECT 1 FROM chat_log cl
+                        WHERE cl.job_id = a.job_id AND cl.role = 'HR') AS replied
+          FROM application a
+         WHERE a.status = 'applied'
+        """
+    ).fetchall()
+
+    buckets = [
+        {"key": "lt60", "label": "60 分以下", "lo": 0, "hi": 60},
+        {"key": "60s", "label": "60–69", "lo": 60, "hi": 70},
+        {"key": "70s", "label": "70–79", "lo": 70, "hi": 80},
+        {"key": "80p", "label": "80 分以上", "lo": 80, "hi": 101},
+    ]
+    for b in buckets:
+        b.update({"applied": 0, "replied": 0, "rate": None, "enough": False})
+
+    matched = 0
+    for job_id, replied in applied:
+        score = scores.get(int(job_id))
+        if score is None:
+            continue
+        matched += 1
+        for b in buckets:
+            if b["lo"] <= score < b["hi"]:
+                b["applied"] += 1
+                b["replied"] += 1 if replied else 0
+                break
+
+    # 每档至少 3 个样本才给比率。少于这个数时，"1 家回了" 和 "0 家回了"
+    # 的差别足够让整条结论反转，而它只是一个人投了几家的随机结果
+    MIN_SAMPLE = 3
+    for b in buckets:
+        b["enough"] = b["applied"] >= MIN_SAMPLE
+        b["rate"] = round(b["replied"] / b["applied"], 2) if b["enough"] else None
+
+    return {
+        "resume_id": rid,
+        "buckets": buckets,
+        "total_applied": len(applied),
+        # 有预测分的那部分：只有它们能用来校准
+        "matched": matched,
+        "verdict": _calibration_verdict(buckets, matched),
+        "note": (
+            "只统计有匹配分数记录的岗位。分数取自最近一次匹配快照 —— "
+            "拿现在的分数去解释过去的决定是不成立的。"
+        ),
+    }
+
+
+def _calibration_verdict(buckets: list[dict], matched: int) -> dict:
+    """一句话结论。允许它说"还看不出来"。"""
+    if matched < 5:
+        return {
+            "level": "unknown",
+            "text": (
+                f"只有 {matched} 个岗位同时有分数记录和投递记录，"
+                "样本太少，现在还看不出分数准不准。"
+                "继续投、继续用扩展同步回音，这个数字才有意义"
+            ),
+        }
+    top = buckets[-1]
+    bottom = buckets[0]
+    if top["enough"] and bottom["enough"] and top["rate"] is not None and bottom["rate"] is not None:
+        if top["rate"] > bottom["rate"]:
+            return {
+                "level": "ok",
+                "text": (
+                    f"分数高的回复率确实更高（{top['label']} {top['rate']:.0%} vs "
+                    f"{bottom['label']} {bottom['rate']:.0%}），当前权重方向是对的"
+                ),
+            }
+        return {
+            "level": "bad",
+            "text": (
+                f"分数最高的那一档回复率反而没有更高（{top['label']} {top['replied']}/{top['applied']}，"
+                f"{bottom['label']} {bottom['replied']}/{bottom['applied']}）。"
+                "这说明现在打分的权重抓错了信号 —— 值得回头看看高分岗位是被哪些项撑起来的"
+            ),
+        }
+    return {
+        "level": "unknown",
+        "text": "样本还不够分档看趋势（每档至少 3 个才给结论），再投几家",
+    }

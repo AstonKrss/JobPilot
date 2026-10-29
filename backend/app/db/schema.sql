@@ -556,3 +556,13 @@ INSERT INTO radar_pref (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 -- 公司法人的其他写法。同一家公司常有多个抬头（美的集团 / 美的 / Midea），
 -- 抽取出来的 company 字段写法不受控，靠别名才能把岗位落到同一条公司记录上
 ALTER TABLE company ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- ---------------------------------------------------------------------------
+-- JD 完整性结论
+--
+-- JD 是第三方文本，可能同时写了两套内容：给人看的正文，和给模型看的
+-- 不可见字符 / 指令行。清洗掉的字符必须留一份记录 —— 删除是静默的，
+-- 如果连"删了什么"都不存，用户会以为这份 JD 原本就长这样，
+-- 而排查"为什么抽取结果不对劲"时也无从下手。
+-- ---------------------------------------------------------------------------
+ALTER TABLE job ADD COLUMN IF NOT EXISTS integrity JSONB NOT NULL DEFAULT '{}'::jsonb;
