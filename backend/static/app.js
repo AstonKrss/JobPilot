@@ -1768,21 +1768,31 @@ function renderChatJobs(jobs) {
   if (!jobs || !jobs.length) return '';
   const label = { pass: '通过', confirm: '待确认', reject: '否决' };
   const cls = { pass: 'ok', confirm: 'warn', reject: 'bad' };
-  return `<div class="chat-jobs">${jobs.map((j) => `
-    <div class="chat-job">
+  return `<div class="chat-jobs">${jobs.map((j) => {
+    // 三栏：fit = 能投；blocked = 方向对但卡住。后者不显示「去投递」——
+    // 引导用户去投一个被判定为进不去的岗位，等于让系统自己打自己的脸。
+    // 卡点（blockers）必须直接可见，因为这一栏存在的意义就是「告诉你差在哪」
+    const isBlocked = j.column === 'blocked';
+    return `
+    <div class="chat-job${isBlocked ? ' blocked' : ''}">
       <div class="chat-job-head">
         <span class="job-name-text">${esc(j.title || '未命名岗位')}</span>
-        <span class="badge ${cls[j.decision] || ''}">${label[j.decision] || j.decision}</span>
-        ${j.score != null ? `<span class="score">${j.score} 分</span>` : ''}
-        ${j.url ? `<a class="apply-link" href="${cleanJobUrl(j.url)}" target="_blank" rel="noreferrer">去投递 ↗</a>` : ''}
+        ${isBlocked
+          ? `<span class="badge bad">方向对 · 投不进</span>`
+          : `<span class="badge ${cls[j.decision] || ''}">${label[j.decision] || j.decision}</span>`}
+        ${!isBlocked && j.score != null ? `<span class="score">${j.score} 分</span>` : ''}
+        ${!isBlocked && j.url ? `<a class="apply-link" href="${cleanJobUrl(j.url)}" target="_blank" rel="noreferrer">去投递 ↗</a>` : ''}
       </div>
       <div class="item-meta">
         ${esc([j.company, j.city].filter(Boolean).join(' · '))}
         ${j.semantic_sim != null ? ` · 语义相关 ${j.semantic_sim}` : ''}
       </div>
-      ${(j.missed_skills || []).length
+      ${isBlocked && (j.blockers || []).length
+        ? `<div class="item-meta missed">卡在：${esc(j.blockers.join('；'))}</div>` : ''}
+      ${!isBlocked && (j.missed_skills || []).length
         ? `<div class="item-meta missed">缺：${esc(j.missed_skills.join('、'))}</div>` : ''}
-    </div>`).join('')}</div>`;
+    </div>`;
+  }).join('')}</div>`;
 }
 
 function addMsgActions(ctx, reply) {

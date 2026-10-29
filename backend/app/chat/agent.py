@@ -50,8 +50,10 @@ PLAN_SYSTEM_PROMPT = """你是求职助手的规划器。根据用户消息和�
 判定标准：
 - 用户表达了岗位方向（如"想找 agent 相关的"）或目标城市，就更新对应字段。
 - intent 只有一个字段，装不下就概括成"XX 方向"。
-- 若既有 intent 又有城市（或历史槽位里已有城市），信息足够，clarify 填 null。
-- 若 intent 和历史槽位里都没有岗位方向，clarify 要问"想找什么方向的岗位"。
+- **只要 intent 有了就足够执行检索**，城市留空表示"不按城市限制"，clarify 填 null。
+  不要因为用户没说城市就反问 —— 用户问的是方向，先把方向上的岗位捞给他看，
+  城市的事可以在结果里说明（"这几个在佛山，你设的是深圳"）。
+- 只有当 intent 和历史槽位里都没有岗位方向时才 clarify，问"想找什么方向的岗位"。
 - 用户在追问上次的结果、说谢谢、闲聊时，chat 给一句自然回复，clarify 填 null。
 
 profile_updates 只记**需要长期记住的求职偏好**，没有就填空数组 []：
@@ -78,7 +80,14 @@ REPLY_SYSTEM_PROMPT = """你是求职助手的对话回复。基于给定的检�
 3. 不要在回复文本里贴任何 URL —— 投递入口会以链接卡片展示，回复里说"点卡片上的去投递"即可。
 4. 不要编造任何结果里没有的信息。没有就说没有，并说明差在哪。
 5. 控制在 250 字以内。
-6. 只输出 JSON 对象：{"reply": "你的回复内容"}，不要 Markdown 代码块。"""
+6. 如果给了「方向对但投不进去的岗位」，用一行说清它为什么不行（城市不符 / 技能差几项），
+   并给一句可执行的建议（改城市设置 / 补哪一项）。**不要混进推荐列表里**，
+   也不要因为它出现了就以为可以投。
+6a. 注意「属于用户这个方向的有几个」。如果是 0，第一句必须直说
+   「这个方向暂时没有能投的」，后面列的岗位要标成「方向不同、但你能投」，
+   **不能用"最值得看""建议优先"这类推荐语气** —— 用户问的是产品岗，
+   递过去的 Java 岗再高分也不是答案。
+7. 只输出 JSON 对象：{"reply": "你的回复内容"}，不要 Markdown 代码块。"""
 
 
 def _job_doc(job: dict) -> str:
@@ -121,6 +130,100 @@ def _pick_resume(profiles: dict[int, dict], intent: str) -> tuple[int | None, di
         if score > best_score:
             best_id, best_score = resume_id, score
     return best_id, {"reason": "按意图与简历内容的语义相关度选出", "similarity": round(best_score, 3)}
+
+
+# 召回层参数
+RECALL_LIMIT = 25          # 向量候选上限：够覆盖"方向像"的全部，又不至于让判定层白跑
+RECALL_MAX = 40            # 候选总数上限（字面 + 向量并集后）
+BLOCKED_MIN_SIM = 0.55     # 「方向对但投不进」里，非字面命中的至少要这么像才算同方向
+
+
+# 切片段时丢掉的词：它们是"话题词"不是"方向词"，
+# 留着会让「岗位」「工作」这种词命中一切标题
+STOP_FRAGMENTS = {"岗位", "工作", "职位", "机会", "方向", "相关", "一个", "什么"}
+
+
+def _fragments(*texts: str) -> list[str]:
+    """把意图切成 2~4 字的片段，用于字面匹配。
+
+    为什么不能整串比：意图常常是组合词（"后端实习"），而标题是"Java开发实习生"。
+    整串匹配一个都命中不了 —— 实测「后端实习」只能召回 8/13 个开发实习岗。
+    切成片段后，"后端" 和 "实习" 都能命中，召回补齐到 13/13。
+
+    2 字片段会产生 "端实" 这种无意义组合，但它们几乎不会出现在真实标题里，
+    所以不会带来误召回；真正起作用的是 "后端""实习" 这些实词。
+    """
+    out: list[str] = []
+    for text in texts:
+        raw = "".join(ch for ch in str(text or "") if ch.isalnum())
+        if len(raw) >= 2:
+            out.append(raw)
+        for n in (2, 3, 4):
+            for i in range(max(0, len(raw) - n + 1)):
+                frag = raw[i:i + n]
+                if len(frag) == n and frag not in STOP_FRAGMENTS:
+                    out.append(frag)
+    return list(dict.fromkeys(out))
+
+
+def _recall_candidates(
+    intent: str, queries: list[str], jobs: list[dict]
+) -> tuple[list[dict], dict]:
+    """按方向捞候选，**完全不看简历**。
+
+    这是把「方向」和「能不能投」拆开的第一个动作。原先是拿 rank() 的 REJECT
+    直接当召回过滤器，于是简历不匹配的岗位在排序发生之前就消失了 ——
+    而用户明确要看的就是那一批（"我想找产品经理的岗位"返回 0 个产品岗）。
+
+    两路并集：
+        字面：意图词 / 扩展词出现在标题里。"产品经理"这种专名向量排不准，
+              字面能救回来（库里的「B端产品经理」就靠这一路）
+        向量：对「标题 + 城市 + 技能」算 cos，取前 RECALL_LIMIT。
+              能救回同义说法（"产品经理" ↔ "产品顾问"）
+
+    刻意不在这里过滤城市：城市是"能不能去"，属于判定层。在召回层过滤的话，
+    用户问"产品经理"时会被画像里的广州 / 深圳悄悄挡掉佛山那 4 个 —— 实测就是这样。
+    更好的做法是让它进「方向对但投不进」那一栏，并告诉他卡在城市设置上。
+    """
+    if not jobs:
+        return [], {"total": 0, "lexical": 0, "vector": 0, "terms": []}
+
+    terms = [t for t in [intent, *(queries or [])] if t and len(t) >= 2]
+    frags = _fragments(*terms)
+
+    lexical_ids: list[int] = []
+    if frags:
+        for j in jobs:
+            title = str(j.get("title") or "")
+            if any(f in title for f in frags):
+                lexical_ids.append(int(j["job_id"]))
+
+    sims = _semantic_order(intent, queries or [], jobs)
+    by_sim = sorted(jobs, key=lambda j: -sims.get(int(j["job_id"]), 0.0))
+    vector_ids = [int(j["job_id"]) for j in by_sim[:RECALL_LIMIT]]
+
+    keep = list(dict.fromkeys([*lexical_ids, *vector_ids]))
+    if len(keep) > RECALL_MAX:
+        # 片段匹配会把候选放得很宽（"实习"命中所有实习岗），宽是好事，
+        # 但判定层要逐个跑语义裁定，得有个上限。
+        # 截断时**字面命中优先**：按向量相似度截会把「Devops实习生」
+        # 这种标题没写"后端"但确实含"实习"的岗位切掉（实测就漏了它）。
+        # 方向词命中比向量更像更可靠
+        lexical_set = set(lexical_ids)
+        keep = sorted(
+            keep, key=lambda jid: (0 if jid in lexical_set else 1, -sims.get(jid, 0.0))
+        )[:RECALL_MAX]
+    keep_set = set(keep)
+    selected = [j for j in by_sim if int(j["job_id"]) in keep_set]
+    return selected, {
+        "total": len(jobs),
+        "lexical": len(lexical_ids),
+        "vector": len(vector_ids),
+        "terms": terms[:5],
+        # 片段也带出去：判断"这个岗位在不在方向上"要用它，
+        # 用整串会把「产品实习生」判成"不在产品方向"
+        "fragments": frags[:20],
+    }
 
 
 def _semantic_order(intent: str, queries: list[str], jobs: list[dict]) -> dict[int, float]:
@@ -262,6 +365,17 @@ async def handle_message(
     if cities:
         slots["cities"] = cities
 
+    # 意图和历史槽位都没有方向时，不要用一个空意图去检索。
+    # 原来的写法会用空意图走完整条管线，把全库按简历分数倒出来 ——
+    # 用户问"佛山有什么岗位"，得到的是一堆和他想找的方向无关的岗位，
+    # 而真正的答案应该是"你想找什么方向"
+    if not intent and not clarify and not chat_reply and not slots.get("intent"):
+        clarify = (
+            "想找什么方向的岗位？给我一个关键词就行（后端 / 产品 / 数据分析），"
+            "我按这个方向去筛。"
+        )
+    intent = intent or slots.get("intent")
+
     plan_note = "意图：" + (intent or "（沿用之前）")
     if cities:
         plan_note += " · 目标城市：" + "、".join(cities)
@@ -342,73 +456,133 @@ async def handle_message(
             # 用户说"帮我找佛山的后端实习"，返回的 6 个岗位里一个实习都没有
             prefs = _prefs_from_profile(prof, cities)
 
-            # 第一轮：规则匹配 + 词表扩展
-            await step("硬约束前置过滤（城市 / 学历 / 性质 / 技能阈值）")
+            # ---- 第一段：召回（只看方向，不看简历）----
+            await step("扩展检索词…")
             queries, used_llm = await _expand_queries(intent or "", profile, used_llm=False)
             if queries:
                 await step("扩展检索词：" + "、".join(queries[:6]) + ("…" if len(queries) > 6 else ""))
             else:
                 await step("检索词：用原始意图，词表与模型都没有扩展")
+
+            candidate_jobs, recall_meta = _recall_candidates(intent or "", queries, jobs)
+            await step(
+                f"按方向捞候选：{len(candidate_jobs)} 个"
+                f"（全库 {recall_meta['total']}，字面命中 {recall_meta['lexical']}）"
+            )
+
+            # ---- 第二段：判定（能不能投），只在候选内做 ----
             await step("语义判定：向量召回 + 模型逐对裁定…")
-            semantic = await _semantic_alignment(profile, jobs)
-            await step("匹配打分（学历/城市/性质已过滤，技能 + 年限累加）…")
-            results = rank(profile, jobs, prefs, semantic)
-            sims = _semantic_order(intent or "", queries, jobs)
+            semantic = await _semantic_alignment(profile, candidate_jobs)
+            await step("匹配打分（学历/城市/性质/技能）…")
+            results = rank(profile, candidate_jobs, prefs, semantic)
+            sims = _semantic_order(intent or "", queries, candidate_jobs)
+
             passed = [r for r in results if r.decision is not Decision.REJECT]
-            await step(f"{len(passed)} 个岗位通过硬约束")
+            await step(f"{len(passed)} 个方向内的岗位能投")
 
-            # 二次召回：结果太少且还没用过模型扩展，就再扩展一轮重排
-            if len(passed) < 5 and not used_llm:
-                await step("通过数偏少，二次召回：换一批检索词再排一次…")
-                more, used_llm = await _expand_queries(
-                    f"{intent or ''} {' '.join(queries)}", profile, used_llm=False
-                )
-                if more:
-                    queries = queries + more
-                    sims = _semantic_order(intent or "", queries, jobs)
+            # cand_by_id 必须在 _in_direction 定义之前赋值：
+            # 闭包捕获的是自由变量，Python 只在**调用时**才解析它 ——
+            # 语法上不报错，运行到排序那一刻才炸（实测：整条对话 500）。
+            # 这类错误 jsdom/单测抓不到，因为没人真的跑过排序路径
+            cand_by_id = {int(j.get("job_id") or 0): j for j in candidate_jobs}
+            frags = recall_meta.get("fragments") or []
 
-            # 排序：先按决策组（通过→待确认→否决），组内规则分 + 语义相关度。
-            # 这里不能用 decision.value 的字符串排序 —— 字母序 confirm 会排在 pass 前面，
-            # 实测导致 6 个中性分的"待确认"全部压过真正通过的岗位
+            def _in_direction(r) -> bool:
+                title = str((cand_by_id.get(r.job_id) or {}).get("title") or "")
+                return any(f in title for f in frags) or sims.get(r.job_id, 0) >= BLOCKED_MIN_SIM
+
+            # 排序：**方向内优先**，方向内再按决策组 + 分数。
+            # 之前的排序只有「决策组 + 分数」，方向权重只有 3 分，跨不过分数差——
+            # 实测「找后端实习」时，2 个安全员（分数虚高）和 2 个 Java 全职岗
+            # 把 5 个真实习岗全部挤出 top6，返回里一个实习都没有。
+            # 用户问的是方向，方向外的岗位分数再高也不是答案；它们可以出现在
+            # 列表尾部，但不能占前面的名额。
             group_order = {Decision.PASS: 0, Decision.NEED_CONFIRM: 1, Decision.REJECT: 2}
 
             def _order(r):
                 sim = sims.get(r.job_id, 0.0)
-                return (group_order[r.decision], -((r.score or 0) + sim * 10))
+                return (0 if _in_direction(r) else 1,
+                        group_order[r.decision], -((r.score or 0) + sim * 10))
 
             passed.sort(key=_order)
-
             top = passed[:6]
-            near_miss = [
-                r
-                for r in results
-                if r.decision is Decision.REJECT and (sims.get(r.job_id, 0) >= 0.45)
-            ][:3]
+            direction_hits = sum(1 for r in top if _in_direction(r))
+
+            # ---- 第三段：方向对但投不进的岗位 ----
+            # 这一栏是这次改动的重点：原先 REJECT 直接把人筛掉，用户永远不知道
+            # "你想去的方向上有 4 个岗位，只是卡在城市/技能"。现在把它们单独列出来，
+            # 并带上卡在哪一条。
+            # frags / _in_direction / cand_by_id 在上面 fit 栏排序处已定义，
+            # 这里直接用同一套判据 —— blocked 栏和 fit 栏必须认同一个"方向"，
+            # 否则会出现"同一个岗位在两栏都不属于方向"的自相矛盾
+            # cand_by_id 已在上面 fit 排序处定义（那里必须先于 _in_direction）
+
+            # 排序：片段命中长度之和优先，相似度其次。
+            #
+            # 只用相似度的话，"产品经理"这一栏会被「项目经理」占满 ——
+            # 它命中"经理"这一个片段，相似度还更高，但方向明显不对。
+            # 只数命中个数也不够：B端产品经理（命中 6 个片段）和项目经理（命中 1 个）
+            # 差得不够开。按**长度加权**才能区分"整句都对上"和"只对上一个词"。
+            def _affinity(r) -> int:
+                title = str((cand_by_id.get(r.job_id) or {}).get("title") or "")
+                return sum(len(f) for f in frags if f in title)
+
+            blocked = sorted(
+                (r for r in results if r.decision is Decision.REJECT and _in_direction(r)),
+                key=lambda r: (-_affinity(r), -sims.get(r.job_id, 0.0)),
+            )[:3]
+            if blocked:
+                await step(f"另有 {len(blocked)} 个方向对但卡住的岗位")
+
+            # 注意：direction_hits 统计的是 top6 里的方向内岗位（见上面排序处）。
+            # 统计整个 passed 的话，39 个候选里 20 个方向内，"6 个里 6 个方向内"
+            # 和"39 个里 20 个"给模型的信号完全不同，前者才是用户眼前的事实
 
             job_urls = {
                 int(j.get("job_id") or 0): j.get("url")
-                for j in jobs
+                for j in candidate_jobs
                 if j.get("url")
             }
             await step("整理结果、生成回复…")
             reply = await _compose(
-                user_text, intent or "", resume_id, top, near_miss, sims, job_urls,
+                user_text, intent or "", resume_id, top, blocked, sims, job_urls,
+                direction_hits=direction_hits,
                 profile_block=_profile_block(prof),
                 recall_block=slots.get("recall_block") or "",
             )
+            by_id = {int(j.get("job_id") or 0): j for j in candidate_jobs}
             jobs_payload = [
                 {
                     "job_id": r.job_id,
                     "title": r.title or r.company or "未命名岗位",
                     "company": r.company,
-                    "city": next((j.get("city") for j in jobs if j.get("job_id") == r.job_id), None),
-                    "url": next((j.get("url") for j in jobs if j.get("job_id") == r.job_id), None),
+                    "city": (by_id.get(r.job_id) or {}).get("city"),
+                    "url": (by_id.get(r.job_id) or {}).get("url"),
                     "score": r.score,
                     "decision": r.decision.value,
                     "semantic_sim": sims.get(r.job_id),
                     "missed_skills": r.missed_skills,
+                    # 三栏里的位置。前端据此区分"能投"和"方向对但卡住"，
+                    # 不再靠自己猜 decision 的含义
+                    "column": "fit",
                 }
                 for r in top
+            ] + [
+                {
+                    "job_id": r.job_id,
+                    "title": r.title or r.company or "未命名岗位",
+                    "company": r.company,
+                    "city": (by_id.get(r.job_id) or {}).get("city"),
+                    "url": (by_id.get(r.job_id) or {}).get("url"),
+                    "score": r.score,
+                    "decision": r.decision.value,
+                    "semantic_sim": sims.get(r.job_id),
+                    "missed_skills": r.missed_skills,
+                    "column": "blocked",
+                    # 卡在哪，给前端直接显示，不用它自己去读 checks
+                    "blockers": [c.detail for c in r.checks if c.decision.value == "reject"][:3],
+                }
+                for r in blocked
             ]
             slots["last_job_ids"] = [r.job_id for r in top]
 
@@ -476,11 +650,12 @@ async def _compose(
     intent: str,
     resume_id: int,
     top: list,
-    near_miss: list,
+    blocked: list,
     sims: dict[int, float],
     urls: dict[int, str] | None = None,
     profile_block: str = "",
     recall_block: str = "",
+    direction_hits: int | None = None,
 ) -> str:
     """把检索结果写成回复。模型失败时退回模板，保证一定有回复。
 
@@ -494,18 +669,28 @@ async def _compose(
             f"- {r.title or r.company or '未命名岗位'}（{r.company or ''}，{r.score if r.score is not None else '-'} 分）"
             + (f" 链接：{url}" if url else "")
         )
-    summary = "\n".join(lines) if lines else "（没有通过硬约束的岗位）"
-    near = "\n".join(
-        f"- {r.title}：{'、'.join(r.missed_skills[:3]) or '硬约束不符'}" for r in near_miss
-    )
+    summary = "\n".join(lines) if lines else "（这个方向上没有能投的岗位）"
+
+    def _why(r) -> str:
+        """从规则结果里取"卡在哪"，而不是只给一句"硬约束不符"。
+
+        用户需要知道是"城市不符"还是"技能差 4 项" —— 前者改个设置就行，
+        后者要补能力。这两件事的处理方式完全不同。
+        """
+        reasons = [c.detail for c in r.checks if c.decision.value == "reject"]
+        return "；".join(reasons[:2]) or "硬约束不符"
+
+    near = "\n".join(f"- {r.title}：{_why(r)}" for r in blocked)
     try:
         result = await chat_json(
             REPLY_SYSTEM_PROMPT,
             f"{profile_block}"
             f"{recall_block}\n\n"
             f"用户消息：{user_text}\n意图：{intent}\n使用简历：#{resume_id}\n"
-            f"通过硬约束的岗位（已按匹配度排序）：\n{summary}\n\n"
-            f"语义相近但被否决的岗位：\n{near or '（无）'}",
+            f"能投的岗位（已按匹配度排序）。其中属于用户这个方向的只有 "
+            f"{direction_hits if direction_hits is not None else '?'} 个：\n{summary}\n\n"
+            f"方向对、但你现在投不进去的岗位（写明卡在哪；不要推荐去投，"
+            f"也不要假装它们能投）：\n{near or '（无）'}",
             what="对话回复",
             max_tokens=900,
         )

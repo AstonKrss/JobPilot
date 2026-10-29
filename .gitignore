@@ -27,3 +27,6 @@ backend/static/_preview*.html
 # 里面有真实简历文件，不能进公开仓库。脚本本身是本地工具，需要时按
 # docs/agent-eval-report-*.md 里的命令重建。
 .testrun/
+
+# 本地工具产物
+.box-agent/

@@ -1619,3 +1619,11 @@ button.danger:hover:not(:disabled) { background: var(--danger-weak); }
   .cal-num { width: 84px; }
   .ats-row { flex-wrap: wrap; }
 }
+
+/* 对话里「方向对但投不进」的卡片：整卡降透明度 + 红点边。
+   它不该和能投的岗位长得一样 —— 视觉上一致，用户就会去投 */
+.chat-job.blocked {
+  opacity: .78;
+  border-left: 3px solid var(--danger);
+  padding-left: 10px;
+}
