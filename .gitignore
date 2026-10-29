@@ -22,3 +22,8 @@ backend/static/_preview*.html
 
 # 内部工作记录（含真实姓名、联系方式、内部讨论），不进公开仓库
 .workbuddy/
+
+# 评测脚本的产物目录（26MB：上传的简历、导出的 docx、抓下来的 js 依赖）。
+# 里面有真实简历文件，不能进公开仓库。脚本本身是本地工具，需要时按
+# docs/agent-eval-report-*.md 里的命令重建。
+.testrun/

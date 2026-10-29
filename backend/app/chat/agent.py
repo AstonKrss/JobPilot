@@ -22,7 +22,7 @@ import logging
 from ..config import settings
 from ..db import conversation_repo
 from ..memory import episode as episode_mem
-from ..memory import profile_repo
+from ..memory import extract, profile_repo, writer
 from ..db import match_repo
 from ..db.pool import get_pool
 from ..llm.deepseek import chat_json, parse_json_object
@@ -40,7 +40,11 @@ PLAN_SYSTEM_PROMPT = """你是求职助手的规划器。根据用户消息和�
   "cities": ["目标城市"...],
   "resume_id": 数字或 null,
   "clarify": "缺少关键信息时，先问用户的一句话；信息足够执行检索则填 null",
-  "chat": "不需要检索时（闲聊、追问、感谢），给一句直接回复；需要检索则填 null"
+  "chat": "不需要检索时（闲聊、追问、感谢），给一句直接回复；需要检索则填 null",
+  "profile_updates": [
+    {"key": "槽位名", "op": "replace|add|remove", "value": 值,
+     "modality": "exclusive|additive|tentative", "evidence": "用户原话片段"}
+  ]
 }
 
 判定标准：
@@ -48,7 +52,23 @@ PLAN_SYSTEM_PROMPT = """你是求职助手的规划器。根据用户消息和�
 - intent 只有一个字段，装不下就概括成"XX 方向"。
 - 若既有 intent 又有城市（或历史槽位里已有城市），信息足够，clarify 填 null。
 - 若 intent 和历史槽位里都没有岗位方向，clarify 要问"想找什么方向的岗位"。
-- 用户在追问上次的结果、说谢谢、闲聊时，chat 给一句自然回复，clarify 填 null。"""
+- 用户在追问上次的结果、说谢谢、闲聊时，chat 给一句自然回复，clarify 填 null。
+
+profile_updates 只记**需要长期记住的求职偏好**，没有就填空数组 []：
+- key 只能取：cities / job_nature / salary_floor / edu_level / work_auth /
+  target_roles / hard_constraints / excluded_companies /
+  accept_outsourcing / accept_relocation
+- modality：exclusive 排他（"只找""不考虑""以后都"）；additive 补充
+  （"也可以""都行"）；tentative 不确定（"可能""也许""听说"）
+- evidence 必须是用户原话片段，不要自己组织语言
+- 临时条件不记："这次先看看深圳的" ≠ 长期只要深圳
+- 对岗位的评论、提问、闲聊都不算偏好（"这个岗位怎么样""简历怎么改"）
+- 槽位语义容易混，按这个来：target_roles 是倾向的公司类型（大厂/国企/研究院），
+  hard_constraints 是对工作条件的要求（双休/不加班/五险一金），
+  work_auth 是届别与应届身份，edu_level 是学历
+- 自我介绍里的客观信息也算（"我是 2028 届本科" → work_auth 2028、edu_level 本科）
+- 用户说完"记住了"时，除了 chat 回一句，**必须同时在 profile_updates 里
+  给出对应的槽位变更** —— 只说记下了、不写数据，等于骗人"""
 
 REPLY_SYSTEM_PROMPT = """你是求职助手的对话回复。基于给定的检索结果写一段自然回复。
 
@@ -247,6 +267,34 @@ async def handle_message(
         plan_note += " · 目标城市：" + "、".join(cities)
     await step(plan_note)
 
+    # ---- 画像写入 ----
+    # 与 PlanAgent 合并执行：它已经在读用户原话、已经在输出 cities，
+    # 顺带抽偏好等于零额外调用、零额外延迟。
+    # 单独再调一次 observe() 会让每轮 +2~3 秒（服务商约 6 tok/s），
+    # 而记忆写入最大的风险从来不是"抽得慢"，是"压根没运行"。
+    memory_note = ""
+    pending_note = ""
+    updates = extract.clean_updates(plan_data.get("profile_updates") or [])
+    if updates:
+        with get_pool().connection() as conn:
+            written = writer.apply_actions(conn, updates, conversation_id)
+            if written["applied"]:
+                # 写完必须重新读一次：本轮的 prefs 和回复都要用新值，
+                # 否则用户刚说"只找佛山"，这一轮仍然按旧城市去搜
+                prof = profile_repo.get_flat_profile(conn)
+        if written["applied"]:
+            memory_note = writer.describe(written["applied"])
+            await step("已写入画像：" + memory_note)
+        elif written["pending"]:
+            # pending 原来是个死胡同：裁决说「挂起等用户确认」，但没有任何
+            # 地方会去确认，等于「静默丢弃」多绕一步。所以这里把它变成一句
+            # 问话 —— 用户回一句「要/不要」就会重新走一遍 L1，
+            # 比悄悄丢掉诚实，也比直接写进去安全
+            pending_note = "、".join(
+                writer.LABELS.get(a.get("key"), a.get("key")) for a in written["pending"]
+            )
+            await step(f"{len(written['pending'])} 条表述不确定，先挂起")
+
     # ---- 不需要检索：闲聊/追问 ----
     if chat_reply and not clarify:
         reply = chat_reply
@@ -277,13 +325,11 @@ async def handle_message(
             slots["resume_note"] = resume_note
             await step(f"选用简历 #{resume_id}（{resume_note.get('reason', '')}）")
 
-            prefs = {
-                "accept_relocation": False,
-                "accept_outsourcing": True,
-                "accept_internship": False,
-                "accept_parttime": False,
-                "target_cities": [str(c) for c in cities],
-            }
+            # prefs 从画像装配，不再手写常量。
+            # 原来 5 个常量硬编码，其中 accept_internship=False 直接和画像里
+            # job_nature="实习" 打架，把整个实习池挡在检索之外 ——
+            # 用户说"帮我找佛山的后端实习"，返回的 6 个岗位里一个实习都没有
+            prefs = _prefs_from_profile(prof, cities)
 
             # 第一轮：规则匹配 + 词表扩展
             await step("硬约束前置过滤（城市 / 学历 / 性质 / 技能阈值）")
@@ -354,6 +400,14 @@ async def handle_message(
                 for r in top
             ]
             slots["last_job_ids"] = [r.job_id for r in top]
+
+    # 写入结果必须说出来。用户被告知"记住了"而库里没变，
+    # 比干脆不记更糟 —— 预期被建立起来，之后所有判断都建立在错的前提上。
+    # 反过来，真的写了也要说，否则用户不知道系统到底记成了什么
+    if memory_note and reply:
+        reply = f"{reply}\n\n已写入画像：{memory_note}"
+    if pending_note and reply:
+        reply = f"{reply}\n\n你提到的「{pending_note}」我不确定是长期要求还是这次的条件，先没写进去。要按它长期筛吗？"
 
     # ---- 落库 ----
     with get_pool().connection() as conn:
@@ -453,6 +507,77 @@ async def _compose(
         logger.warning("回复生成失败，退回模板：%s", exc)
         head = f"围绕「{intent}」找到 {len(top)} 个通过硬约束的岗位：\n" if intent else ""
         return head + summary + (f"\n\n语义相近但不满足硬约束：\n{near}" if near else "")
+
+
+def _as_bool(value, default: bool) -> bool:
+    """把库里读出来的值转成布尔。
+
+    画像存的是 JSONB，同一个槽位历史上有过 true / "true" / "接受" 几种写法
+    （早期是人工通过 PUT 接口写的）。不做归一的话，字符串 "false" 是真值 ——
+    最坏的情况是用户明确写了"不接受外包"，系统按接受处理。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "是", "接受", "可以", "愿意"):
+            return True
+        if v in ("false", "0", "否", "不接受", "不", "不愿意"):
+            return False
+    return default
+
+
+def _pairs(value) -> list[str]:
+    """槽位值统一成字符串列表。历史上的 cities 有 ["广州"] 也有 "广州"。"""
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [p for p in value.replace("，", ",").split(",") if p.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if str(v).strip()]
+    return [str(value)]
+
+
+INTERNSHIP_WORDS = ("实习", "见习", "日常实习", "暑期实习")
+FULLTIME_WORDS = ("全职", "社招", "正式", "校招正职")
+
+
+def _prefs_from_profile(prof: dict, cities: list | None) -> dict:
+    """把画像翻译成匹配引擎的开关。
+
+    为什么必须有这一层
+        原来这里写的是 5 个常量，其中 accept_internship=False 与画像里
+        job_nature="实习" 直接冲突。后果不是"少一个开关"，而是整个实习池
+        在检索阶段被清空：用户说"找佛山的后端实习"，返回 6 个岗位里
+        一个实习都没有，而库里躺着 38 个实习岗。
+
+    缺省值取向：**未知一律放宽**
+        accept_outsourcing 未知 → True，accept_internship 未知 → True。
+        理由是判定层还会再拦一次（reject 会写明卡在哪），而召回层如果
+        先过滤掉，用户永远不知道有这些岗位存在 —— 前者的代价是多看一条，
+        后者的代价是以为"没有"。
+
+    accept_parttime 仍然默认 False：兼职和实习是两回事，混进来会让结果变脏。
+    """
+    nature = prof.get("job_nature")
+    nature_text = " ".join(_pairs(nature)) if isinstance(nature, (list, tuple)) else str(nature or "")
+
+    if any(w in nature_text for w in INTERNSHIP_WORDS):
+        accept_internship = True
+    elif any(w in nature_text for w in FULLTIME_WORDS):
+        accept_internship = False
+    else:
+        accept_internship = True
+
+    target = [str(c) for c in (cities or []) if c] or _pairs(prof.get("cities"))
+
+    return {
+        "accept_relocation": _as_bool(prof.get("accept_relocation"), False),
+        "accept_outsourcing": _as_bool(prof.get("accept_outsourcing"), True),
+        "accept_internship": accept_internship,
+        "accept_parttime": "兼职" in nature_text,
+        "target_cities": target,
+    }
 
 
 def _profile_block(prof: dict) -> str:

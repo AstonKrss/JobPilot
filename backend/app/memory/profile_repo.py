@@ -61,18 +61,35 @@ def get_history(conn: psycopg.Connection, key: str | None = None, limit: int = 5
 def _merge(current, action: dict):
     """按 op 与 modality 算新值。
 
-    合并规则刻意简单：additive + add 时往数组里并（已有的保留），
-    其余情况一律以新值为准 —— 复杂规则在数据量小时只会带来误判。
+    规则只有三条：
+        op=remove          → 从数组里移除（不再用"覆盖"糊弄，那会把别的值一起清掉）
+        additive 或 op=add → 并进数组，已有的保留
+        其余               → 覆盖
+
+    第一条和第二条都是 bug 修出来的：
+
+    - 原来只判 `modality=="additive" and op=="add"`。模型只要少给一个 op
+      （提示词里并没有强制二者同现），"深圳也可以" 就会走覆盖分支，
+      把已有的广州整条丢掉。历史数据里有一次是正确合并的 —— 那是运气，不是约束。
+    - op=remove 原来落到覆盖分支，等于"要删 X"变成"只留 X"。提示词里写了
+      允许 remove，代码却没实现，这类不一致最难发现：模型照做了，数据反了。
     """
+    op = action.get("op")
     new = action.get("value")
-    if action.get("modality") == "additive" and action.get("op") == "add":
-        base = current if isinstance(current, list) else ([current] if current else [])
+    base = current if isinstance(current, list) else ([current] if current else [])
+
+    if op == "remove":
+        drop = new if isinstance(new, list) else [new]
+        return [item for item in base if item not in drop]
+
+    if action.get("modality") == "additive" or op == "add":
         items = new if isinstance(new, list) else [new]
         merged = list(base)
         for item in items:
             if item and item not in merged:
                 merged.append(item)
         return merged
+
     return new
 
 

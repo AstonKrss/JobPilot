@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..db.pool import get_pool
-from ..memory import extract, profile_repo
+from ..memory import extract, profile_repo, writer
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/profile", tags=["profile"])
@@ -40,45 +40,37 @@ async def get_profile(history_limit: int = 30) -> dict:
 async def observe(payload: ObserveRequest) -> dict:
     """完整链路：判断这句话要不要改画像，改了就说清依据。
 
-    返回值里带着每一层的判定，这是它存在的意义——
+    返回值里带着每一层的判定，这是它存在的意义 ——
     "为什么系统认为我接受广州" 必须能回答，否则记忆就成了黑箱。
+
+    真正的逻辑在 `memory/writer.py`：对话链路走的是同一个函数。
+    分开写两份的话，"接口能写、对话不写"这种事会再发生一次 ——
+    评测已经踩过，实测结果是助手答应得好好的、数据库一条没动。
     """
     text = (payload.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="内容为空")
 
-    if not extract.should_extract(text):
+    with get_pool().connection() as conn:
+        result = await writer.apply_text(conn, text, payload.conversation_id)
+
+    if not result.get("triggered"):
         return {
             "triggered": False,
-            "reason": "L0 规则预筛未命中：没有同时出现偏好信号词与槽位线索",
+            "reason": result.get("reason"),
             "applied": [],
             "pending": [],
         }
 
-    with get_pool().connection() as conn:
-        current = profile_repo.get_flat_profile(conn)
-
-    updates = await extract.extract_updates(text, current)
-
-    applied: list[dict] = []
-    pending: list[dict] = []
-    skipped: list[dict] = []
-    with get_pool().connection() as conn:
-        for action in updates:
-            decision = extract.decide(action, current.get(action["key"]))
-            if decision == "apply":
-                applied.append(profile_repo.apply_update(conn, action, payload.conversation_id))
-            elif decision == "pending":
-                pending.append(action)  # L2 挂起：表述不确定，等用户确认，先不写
-            else:
-                skipped.append(action)
-
+    applied = result["applied"]
     return {
         "triggered": True,
-        "extracted": len(updates),
+        "extracted": len(applied) + len(result["pending"]) + len(result["skipped"]),
         "applied": applied,
-        "pending": pending,
-        "skipped": skipped,
+        "pending": result["pending"],
+        "skipped": result["skipped"],
+        # 一行中文，界面直接显示「已记下：目标城市 → 佛山」
+        "summary": writer.describe(applied),
     }
 
 
