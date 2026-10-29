@@ -107,6 +107,23 @@ def part_merge() -> None:
     check("重复值不重复加", _merge(["广州"], {"modality": "additive", "value": "广州"}) == ["广州"])
 
 
+def part_search_vs_pref() -> None:
+    """「这一轮的搜索条件」和「长期偏好」必须分开。
+
+    这条是实际跑出来的：加上写入之后，用户说「帮我找佛山的岗位」，
+    cities 就被改成佛山；下次说「广州的呢」又改回来。显式设定不再稳定 ——
+    用户明明说过「以后只找广州」，一次搜索就能把它改掉。
+    """
+    from app.chat.agent import _is_search_command
+
+    print("\n== 搜索请求 vs 长期偏好 ==")
+    for text in ("帮我找佛山的后端实习岗位", "给我看看深圳的后端", "替我搜一下广州的测试岗"):
+        check(f"祈使句判为搜索：{text}", _is_search_command(text))
+    for text in ("以后只找广州的岗位", "我想找杭州或宁波的", "佛山也行，主要想留广东",
+                 "以后都帮我找佛山的", "不接受外包，记住了"):
+        check(f"陈述/承诺判为偏好：{text}", not _is_search_command(text))
+
+
 def part_wiring() -> None:
     print("\n== 静态接线：两处必须共用同一个写入函数 ==")
     agent = (ROOT / "backend/app/chat/agent.py").read_text(encoding="utf-8")
@@ -127,6 +144,8 @@ def part_wiring() -> None:
           "profile_updates" in agent)
     check("提示词里写了「只说不写等于骗人」",
           "等于骗人" in agent)
+    check("搜索请求不会改写城市/目标岗位", "SEARCH_ONLY_KEYS" in agent)
+    check("没写入时会说明原因", "没写进长期偏好" in agent)
 
 
 def part_live() -> None:
@@ -201,6 +220,7 @@ def main() -> int:
     part_l0()
     part_prefs()
     part_merge()
+    part_search_vs_pref()
     part_wiring()
 
     if "--no-live" in sys.argv:

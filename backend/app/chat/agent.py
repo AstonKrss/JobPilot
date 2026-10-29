@@ -274,7 +274,18 @@ async def handle_message(
     # 而记忆写入最大的风险从来不是"抽得慢"，是"压根没运行"。
     memory_note = ""
     pending_note = ""
+    scope_note = ""
     updates = extract.clean_updates(plan_data.get("profile_updates") or [])
+    if updates and _is_search_command(user_text):
+        kept = [u for u in updates if u.get("key") not in SEARCH_ONLY_KEYS]
+        dropped = [u for u in updates if u.get("key") in SEARCH_ONLY_KEYS]
+        if dropped:
+            # 不写，但要说明白。静默丢弃和写错一样糟：
+            # 用户会以为"我说过佛山了，系统应该记得"
+            scope_note = "、".join(
+                writer.LABELS.get(u.get("key"), u.get("key")) for u in dropped
+            )
+        updates = kept
     if updates:
         with get_pool().connection() as conn:
             written = writer.apply_actions(conn, updates, conversation_id)
@@ -406,6 +417,8 @@ async def handle_message(
     # 反过来，真的写了也要说，否则用户不知道系统到底记成了什么
     if memory_note and reply:
         reply = f"{reply}\n\n已写入画像：{memory_note}"
+    if scope_note and reply:
+        reply = f"{reply}\n\n这次的「{scope_note}」我当成这一轮的搜索条件，没写进长期偏好 —— 要长期按它筛就说一句「以后都这样」"
     if pending_note and reply:
         reply = f"{reply}\n\n你提到的「{pending_note}」我不确定是长期要求还是这次的条件，先没写进去。要按它长期筛吗？"
 
@@ -540,6 +553,30 @@ def _pairs(value) -> list[str]:
 
 INTERNSHIP_WORDS = ("实习", "见习", "日常实习", "暑期实习")
 FULLTIME_WORDS = ("全职", "社招", "正式", "校招正职")
+
+
+# ---- 「这一轮的任务」还是「长期偏好」 ----
+#
+# 这是把记忆写进对话之后立刻暴露的问题：用户说「帮我找佛山的后端实习岗位」，
+# cities 就被写成佛山；下次说「广州的呢」，又变成广州。结果**显式设定不再稳定** ——
+# 用户明明说过「以后只找广州」，一次搜索就能把它改掉。
+#
+# 判据用语气，不用槽位：祈使句（帮我/给我/替我）是让我去做一件事，
+# 里面的城市和方向是这次的条件；陈述句（我想找/我只找）才是偏好。
+# 带排他标记的祈使句仍然算偏好（「以后只帮我找佛山的」）。
+IMPERATIVE_MARKERS = ("帮我", "给我", "替我", "找一下", "搜一下", "看看有没有", "帮忙找")
+COMMIT_MARKERS = ("只", "仅", "以后", "记住", "别再", "不想", "不考虑", "排除",
+                  "不要", "都别", "改成", "必须", "以后都")
+# 只有这两个槽位会被本轮条件污染；其余槽位（外包、学历、届别）祈使句里说的
+# 也往往是真偏好，不动
+SEARCH_ONLY_KEYS = {"cities", "target_roles"}
+
+
+def _is_search_command(text: str) -> bool:
+    """这句话是不是「让我去搜一下」，而不是在交代长期偏好。"""
+    if any(m in text for m in COMMIT_MARKERS):
+        return False
+    return any(m in text for m in IMPERATIVE_MARKERS)
 
 
 def _prefs_from_profile(prof: dict, cities: list | None) -> dict:
