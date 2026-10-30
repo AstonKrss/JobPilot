@@ -52,6 +52,16 @@ MIN_MEDIAN_BLOCK_CHARS = 30.0
 SIDEBAR_MAX_WIDTH_RATIO = 0.40
 MAIN_MIN_WIDTH_RATIO = 0.45
 
+# 多栏（≥3 栏）检测。
+# 为什么不能靠"最宽空白带 + 递归"：三栏时最宽的那条空白切一刀，会把另外两栏
+# 并进同一侧，两栏判据（两侧成段 / 侧边栏形态）对这种"半页两栏"必然失败 ——
+# 实测 T1 三栏等宽全部读串。正确做法是先找**所有**显著空白带：一页里并存
+# 两条以上贯穿性空白带，本身就是强分栏证据，不需要再过两栏形态判据。
+# 防误判：每段至少 MIN_BLOCKS_PER_COLUMN 块、占比 ≥15%、各段 y 范围两两重叠
+# （并列关系）——单栏正文里两条贯穿整页的空白带几乎不可能出现。
+MULTI_COL_MIN_SEGMENTS = 3
+MULTI_COL_MIN_SHARE = 0.15
+
 # 尝试剥离的顶部横跨块上限。
 # 真实两栏简历几乎都有横跨整页的姓名/标题行，它会把栏间空白堵死，
 # 使整页被判成单栏、左右逐行交错。剥离顶部若干"独占行"后重新检测分栏，
@@ -223,27 +233,130 @@ def _apply_gap(blocks: list[Block], gap: tuple[float, float]) -> list[list[Block
     return [left, right]
 
 
+# 递归切栏深度。2 意味着最多切出 4 栏：真实简历里「左窄栏 + 中主栏 + 右时间线」
+# 的三栏布局存在，四栏以上几乎只出现在报纸排版里
+MAX_SPLIT_DEPTH = 2
+
+
+def _split_recursive(blocks: list[Block], gap: tuple[float, float], depth: int) -> list[list[Block]]:
+    """对切出的每一栏递归再找空白带，支持三栏 / 四栏。
+
+    为什么递归是安全的：只有父级已经通过了完整的分栏判据（覆盖数空白带 +
+    两侧成段文字或侧边栏形态），子集才会进入递归 —— 子集规模更小、噪声更少，
+    误切概率不会比单层更高。左标题右时间这类「该按行读」的布局在顶层就被
+    判据拦下，根本不会进到这里。
+
+    返回空栏时退回原集合，保证不丢内容。
+    """
+    cols = _apply_gap(blocks, gap)
+    if len(cols) < 2 or depth >= MAX_SPLIT_DEPTH:
+        return cols
+    out: list[list[Block]] = []
+    for col in cols:
+        if len(col) < MIN_BLOCKS_PER_COLUMN * 2:
+            out.append(col)
+            continue
+        sub_gap = _find_column_gap(col)
+        if sub_gap is None:
+            out.append(col)
+        else:
+            sub = _split_recursive(col, sub_gap, depth + 1)
+            out.extend(sub if sub else [col])
+    return out
+
+
+def _find_all_gaps(blocks: list[Block], width: float) -> list[tuple[float, float]]:
+    """找出所有宽度达标的贯穿性空白带（按位置从左到右）。"""
+    min_x = min(b.x0 for b in blocks)
+    max_x = max(b.x1 for b in blocks)
+    if max_x - min_x <= 0:
+        return []
+    step = (max_x - min_x) / 400
+    runs: list[tuple[float, float]] = []
+    run_start: float | None = None
+    x = min_x
+    while x <= max_x:
+        covered = any(b.x0 <= x <= b.x1 for b in blocks)
+        if not covered:
+            if run_start is None:
+                run_start = x
+        else:
+            if run_start is not None:
+                runs.append((run_start, x))
+                run_start = None
+        x += step
+    if run_start is not None:
+        runs.append((run_start, max_x))
+    return [r for r in runs if (r[1] - r[0]) >= width * MIN_GAP_RATIO]
+
+
+def _try_multi_column(blocks: list[Block]) -> list[list[Block]] | None:
+    """多栏（≥3 栏）检测：两条以上贯穿空白带 → 直接按段切，不套两栏形态判据。
+
+    通过条件：段数 ≥ MULTI_COL_MIN_SEGMENTS、每段 ≥ MIN_BLOCKS_PER_COLUMN 块、
+    每段块数占比 ≥ MULTI_COL_MIN_SHARE、各段 y 范围与相邻段重叠 ≥ MIN_VERTICAL_OVERLAP
+    （并列关系，排除"上中下三段"被竖着切成三栏）。
+    """
+    if len(blocks) < MULTI_COL_MIN_SEGMENTS * MIN_BLOCKS_PER_COLUMN:
+        return None
+    min_x = min(b.x0 for b in blocks)
+    max_x = max(b.x1 for b in blocks)
+    gaps = _find_all_gaps(blocks, max_x - min_x)
+    if len(gaps) < MULTI_COL_MIN_SEGMENTS - 1:
+        return None
+
+    # 按空白带中点切段
+    cuts = [(g[0] + g[1]) / 2 for g in gaps]
+    segments: list[list[Block]] = []
+    prev = min_x - 1e-6
+    for cut in cuts:
+        seg = [b for b in blocks if prev < b.cx <= cut]
+        segments.append(seg)
+        prev = cut
+    segments.append([b for b in blocks if b.cx > prev])
+    segments = [s for s in segments if s]
+    if len(segments) < MULTI_COL_MIN_SEGMENTS:
+        return None
+    if any(len(s) < MIN_BLOCKS_PER_COLUMN for s in segments):
+        return None
+    total = len(blocks)
+    if any(len(s) / total < MULTI_COL_MIN_SHARE for s in segments):
+        return None
+    for a, b in zip(segments, segments[1:]):
+        if _vertical_overlap_ratio(a, b) < MIN_VERTICAL_OVERLAP:
+            return None
+    logger.debug("多栏检测命中：%d 段 / %d 条空白带", len(segments), len(gaps))
+    return segments
+
+
 def _split_columns(blocks: list[Block]) -> tuple[list[Block], list[list[Block]]]:
     """切成 (顶部横跨块, 各栏)。
 
     顶部横跨块单独返回的原因：它是横跨整页的姓名/标题行，本身不属于任何一栏。
     按中心 x 塞进某一栏，会让姓名出现在侧边栏中间或正文中间。
 
-    分栏检测失败时会尝试剥离顶部若干块再试 —— 页眉正是最常见的失败原因：
-    它横跨栏间空白，把整条空白堵死，导致整页被判为单栏。
+    多栏（≥3 栏）优先于两栏检测：三栏布局走两栏判据必然失败（最宽空白带
+    切一刀会把两栏并进一侧），所以先试多栏，命中就直接按段返回。
     """
+    multi = _try_multi_column(blocks)
+    if multi:
+        return [], multi
+
     gap = _find_column_gap(blocks)
     if gap is not None:
-        return [], _apply_gap(blocks, gap)
+        return [], _split_recursive(blocks, gap, depth=0)
 
     ordered = sorted(blocks, key=lambda b: (b.y0, b.x0))
     limit = min(MAX_HEADER_BLOCKS, len(ordered) - 2)
     for cut in range(1, max(limit, 0) + 1):
         header = ordered[:cut]
         body = ordered[cut:]
+        body_multi = _try_multi_column(body)
+        if body_multi:
+            return header, body_multi
         body_gap = _find_column_gap(body)
         if body_gap is not None:
-            columns = _apply_gap(body, body_gap)
+            columns = _split_recursive(body, body_gap, depth=0)
             if len(columns) > 1:
                 logger.debug("剥离顶部 %d 个横跨块后检测到分栏", cut)
                 return header, columns
