@@ -4,11 +4,13 @@
     两栏排版的简历，按 PDF 原生顺序或单纯按 y 排序会读串：左栏第 3 行与右栏第 1 行
     y 坐标相近，会被排到一起，句子直接崩掉。这不是模型能力问题，是几何问题。
 
-做法（纯几何，不引入版面分析模型）
-    1. 找「栏间空白」：存在一段 x 区间，页面中没有任何文本块横跨它，且左右两侧都有
-       足够多的内容、且两者的 y 范围显著重叠（重叠才说明是并列两栏，而不是上下结构）
-    2. 按这条空白把整页切成若干栏，栏与栏之间按从左到右的顺序读
-    3. 每栏内部按 y 聚成行，行内按 x 排序 —— 这样「公司名    2020.03-2023.06」
+做法（纯几何，不引入版面分析模型）—— 即经典 X-Y Cut 的交替递归
+    1. 横向切（Y）：找「横向空白带」（整行无文字），把页面切成上下若干段 ——
+       页眉、横跨整页的章节标题由此自然分离，不再依赖「猜顶部几块」
+    2. 纵向切（X）：每段内找「栏间空白带」（整列无文字），按从左到右读各栏；
+       一页并存两条以上栏缝时直接按多栏切，两栏则仍需通过形态判据
+       （两侧成段文字 / 侧边栏形态），两栏还可递归再切（最多 4 栏）
+    3. 栏内按 y 聚成行，行内按 x 排序 —— 这样「公司名    2020.03-2023.06」
        这类左名右时间的写法才会并回同一行
 
 为什么扫描件也走这里
@@ -265,29 +267,59 @@ def _split_recursive(blocks: list[Block], gap: tuple[float, float], depth: int) 
     return out
 
 
-def _find_all_gaps(blocks: list[Block], width: float) -> list[tuple[float, float]]:
-    """找出所有宽度达标的贯穿性空白带（按位置从左到右）。"""
-    min_x = min(b.x0 for b in blocks)
-    max_x = max(b.x1 for b in blocks)
-    if max_x - min_x <= 0:
+def _scan_gaps(
+    spans: list[tuple[float, float]], total: float
+) -> list[tuple[float, float]]:
+    """在一根轴上找出所有「没有任何元素覆盖」的空白区段（按位置排序）。
+
+    spans 是 (start, end) 列表；total 是这根轴的内容总跨度。
+    采样步长取跨度的 1/400，兼顾精度与开销。
+    纵向找栏缝、横向找行缝共用这一个实现 —— 之前 _find_all_gaps 和
+    _find_column_gap 各写了一份扫描循环，正是 review 指出的重复。
+    """
+    if not spans or total <= 0:
         return []
-    step = (max_x - min_x) / 400
+    lo = min(a for a, _ in spans)
+    hi = max(b for _, b in spans)
+    if hi - lo <= 0:
+        return []
+    step = (hi - lo) / 400
     runs: list[tuple[float, float]] = []
     run_start: float | None = None
-    x = min_x
-    while x <= max_x:
-        covered = any(b.x0 <= x <= b.x1 for b in blocks)
+    pos = lo
+    while pos <= hi:
+        covered = any(a <= pos <= b for a, b in spans)
         if not covered:
             if run_start is None:
-                run_start = x
+                run_start = pos
         else:
             if run_start is not None:
-                runs.append((run_start, x))
+                runs.append((run_start, pos))
                 run_start = None
-        x += step
+        pos += step
     if run_start is not None:
-        runs.append((run_start, max_x))
+        runs.append((run_start, hi))
+    return runs
+
+
+def _find_all_gaps(blocks: list[Block], width: float) -> list[tuple[float, float]]:
+    """找出所有宽度达标的贯穿性空白带（x 轴，按位置从左到右）。"""
+    runs = _scan_gaps([(b.x0, b.x1) for b in blocks], width)
     return [r for r in runs if (r[1] - r[0]) >= width * MIN_GAP_RATIO]
+
+
+def _find_row_gaps(blocks: list[Block]) -> list[tuple[float, float]]:
+    """找出所有宽度达标的横向空白带（y 轴）。
+
+    横向空白带意味着「上下两块内容之间整行都没有文字」—— 横跨整页的
+    章节标题 / 页眉正是被这样的空隙与正文隔开。这是 X-Y Cut 的另一半：
+    纵向切栏解决「左右并列」，横向切分解决「上下分节」。
+    """
+    height = max(b.y1 for b in blocks) - min(b.y0 for b in blocks)
+    if height <= 0:
+        return []
+    runs = _scan_gaps([(b.y0, b.y1) for b in blocks], height)
+    return [r for r in runs if (r[1] - r[0]) >= height * MIN_GAP_RATIO]
 
 
 def _try_multi_column(blocks: list[Block]) -> list[list[Block]] | None:
@@ -327,6 +359,241 @@ def _try_multi_column(blocks: list[Block]) -> list[list[Block]] | None:
             return None
     logger.debug("多栏检测命中：%d 段 / %d 条空白带", len(segments), len(gaps))
     return segments
+
+
+def _split_rows(blocks: list[Block]) -> list[list[Block]]:
+    """沿横向空白带把页面切成若干「横段」，段按 y 从上到下。
+
+    这是 X-Y Cut 的另一半。横切的安全性论证和纵切不同、且更强：
+    段按 y 排列本来就与阅读顺序一致 —— **横切永远不会读串**，
+    它只影响每段内部栏检测的粒度。所以判据只需两条：空白带宽度达标、
+    每段至少 2 块（1 块的段没有内部结构可分析）。
+
+    它解决的三类问题：
+    - 横跨整页的章节标题（T4）：标题与上下正文之间的空隙把页面分成
+      三段，标题自然成为独立段，不再「堵死栏间缝导致整页判成单栏」
+    - 页眉：与正文之间的空隙使其自动分离，「剥顶部 4 块」的猜测退役
+    - 上下结构（上半页一段、下半页一段）：横切后各自按单栏读 ——
+      之前靠 y 重叠判据拒绝纵切，现在由横切给出正确答案
+
+    一个必须说明的取舍：单栏正文的段落间距也可能被横切。但那**无害** ——
+    段按 y 排的顺序与原文一致，段内单栏按行读，整体顺序不变。
+    """
+    if len(blocks) < MIN_BLOCKS_PER_COLUMN * 2:
+        return [blocks]
+    gaps = _find_row_gaps(blocks)
+    if not gaps:
+        return [blocks]
+    mids = [(a + b) / 2 for a, b in gaps]
+    segments: list[list[Block]] = []
+    prev = float("-inf")
+    for mid in mids:
+        seg = [b for b in blocks if prev <= b.cy < mid]
+        if seg:
+            segments.append(seg)
+        prev = mid
+    tail = [b for b in blocks if b.cy >= prev]
+    if tail:
+        segments.append(tail)
+    # 注意不能按「段内块数」过滤：页眉正是单块段，滤掉它就是丢内容。
+    # 单块段进 _split_columns 后纵切判据不通过、按单栏读，顺序依然正确
+    segments = [seg for seg in segments if seg]
+    return segments if len(segments) >= 2 else [blocks]
+
+
+def _row_gap_allowed(
+    blocks: list[Block], gap: tuple[float, float], vertical_width: float
+) -> bool:
+    """这条横缝是不是「分节符」（页眉 / 章节标题 / 上下接续）。
+
+    宽度比较解决不了的问题：侧边栏布局里，正文条目之间的行距空隙
+    （47-53pt）比栏缝（40pt）还宽 —— 按「谁宽切谁」会把贯穿全高的
+    侧边栏拦腰切断（实测 P3 侧边栏被切成两截、正文插进中间）。
+    T4 的标题缝与 P3 的行距缝在宽度上无法区分，能区分的是**缝两侧
+    内容的关系**，三条规则按序判断：
+
+    1. 缝上方只有一两块、且 y 跨度不超过两三行 → 那是页眉/标题，允许
+       （T2 页眉 1 块、T4 标题 2 块跨度 12pt）
+    2. 缝下方内容的 x 范围与上方**无重叠** → 上下是接续关系而非并列
+       （T3：上方左中两栏 x 40-500，下方右栏 x 540-750），允许
+    3. 上下 x 范围大量重叠 → 两侧是同一批栏的断面，横切会拦腰切栏，
+       拒绝（P3：每条缝上下都是侧边栏 + 正文两个相同区域）
+    """
+    mid = (gap[0] + gap[1]) / 2
+    above = [b for b in blocks if b.cy < mid]
+    below = [b for b in blocks if b.cy >= mid]
+    if not above or not below:
+        return True
+
+    heights = sorted(b.height for b in blocks)
+    median_h = heights[len(heights) // 2] or 1.0
+    above_span = max(b.y1 for b in above) - min(b.y0 for b in above)
+    if len(above) <= 2 and above_span <= median_h * 2.5:
+        # 上方两块时还要看它们之间的横向间隙：分节符两侧的标题之间隔着
+        # 大片空白（T4：140pt），而「侧边栏一行 + 正文一行」之间的间隙
+        # 就是栏缝本身（P3：34pt ≈ 栏缝 34pt）—— 后者是双栏的一行，
+        # 横切它会拦腰切栏
+        if len(above) == 2:
+            l_blk, r_blk = sorted(above, key=lambda b: b.cx)
+            col_w = max(b.x1 for b in blocks) - min(b.x0 for b in blocks)
+            x_gap = r_blk.x0 - l_blk.x1
+            if x_gap < max(vertical_width * 2, col_w * 0.15):
+                return False
+        return True
+
+    a_lo, a_hi = min(b.x0 for b in above), max(b.x1 for b in above)
+    b_lo, b_hi = min(b.x0 for b in below), max(b.x1 for b in below)
+    overlap = min(a_hi, b_hi) - max(a_lo, b_lo)
+    if overlap <= 0:
+        return True
+
+    # 重叠比例过半说明下方大部分内容「接续」上方已有的栏 → 拒绝
+    span = max(a_hi - a_lo, b_hi - b_lo, 1e-6)
+    return overlap / span < 0.5
+
+
+def _strip_full_width_top(blocks: list[Block]) -> tuple[list[Block], list[Block]]:
+    """剥离页面顶部的「横跨块」（页眉 / 全宽标题），返回 (剥离块, 其余)。
+
+    为什么这一步必须在方向决策之前：横跨块把纵向栏缝堵死 —— col_gap 和
+    multi 全部失效，vertical_width 退化成 0，此时任何横缝在宽度比较里都
+    「更宽」，横切会在错误的粒度上发生（实测 P3 整页被切成 6 段）。
+    剥掉之后纵向几何才可见。
+
+    两类合法的剥离对象，逐个前缀尝试：
+      页眉/孤立标题：顶部块与后续内容之间有大纵向空隙（≥2.5 倍中位块高）。
+        P3 页眉只有 15 字、自身覆盖 30%，靠「悬空」识别而不是覆盖宽度。
+      分节标题对：多块合计覆盖 ≥80% 内容宽、块间横向间隙 ≥15%（T4 的
+        两个标题间隙 140pt）、且与正文之间有纵向空隙。
+    三栏/双栏的「第一行」会被双条件拦下：块间间隙就是栏缝（P4 实测 7.8%
+    内容宽），与正文的空隙只有一行距 —— 都不满足剥离条件。
+    """
+    if len(blocks) < MIN_BLOCKS_PER_COLUMN * 2:
+        return [], blocks
+    content_lo = min(b.x0 for b in blocks)
+    content_hi = max(b.x1 for b in blocks)
+    content_w = content_hi - content_lo
+    if content_w <= 0:
+        return [], blocks
+
+    ordered = sorted(blocks, key=lambda b: (b.y0, b.x0))
+    heights = sorted(b.height for b in blocks)
+    median_h = heights[len(heights) // 2] or 1.0
+    floating_min = median_h * 2.5
+
+    for i in range(1, min(MAX_HEADER_BLOCKS, len(ordered) - 1) + 1):
+        prefix = ordered[:i]
+        body = ordered[i:]
+        if len(body) < MIN_BLOCKS_PER_COLUMN:
+            break
+        prefix_bottom = max(b.y1 for b in prefix)
+        body_top = min(b.y0 for b in body)
+        if body_top - prefix_bottom < floating_min:
+            # 前缀与正文贴着 → 顶部不是页眉，整份从正文开始
+            break
+        if i == 1:
+            return prefix, body
+        # 多块：必须整体横跨内容宽、且块间是「分节级」横向间隙
+        covered_lo = min(b.x0 for b in prefix)
+        covered_hi = max(b.x1 for b in prefix)
+        if (covered_hi - covered_lo) / content_w < 0.80:
+            break
+        spans = sorted((b.x0, b.x1) for b in prefix)
+        max_x_gap, cur_hi = 0.0, spans[0][1]
+        for lo, hi in spans[1:]:
+            max_x_gap = max(max_x_gap, lo - cur_hi)
+            cur_hi = max(cur_hi, hi)
+        if max_x_gap < content_w * 0.15:
+            break
+        logger.debug("剥离顶部 %d 个分节块（覆盖 %.0f%%）", i,
+                     (covered_hi - covered_lo) / content_w * 100)
+        return prefix, body
+    return [], blocks
+
+
+def _xy_split(blocks: list[Block]) -> list[list[Block]]:
+    """X-Y Cut 的方向决策：纵缝与横缝谁宽先切谁。
+
+    为什么必须比较而不是固定先横或先纵：
+    - 固定先横：双栏/三栏的行与行之间也有空隙（行距），稀疏版面会被
+      拦腰切成一行一段，每段块数太少、栏检测失效 → 全部退回按行读
+      （实测 T1 三栏 12 块全交错）。
+    - 固定先纵：横跨章节标题堵死栏缝，T4 永远解不开。
+
+    比较对象是「可用的纵向切分宽度」与「最长横向空白带」：
+    纵向可用 = 多栏命中的缝，或通过两栏形态判据的那条缝。
+    两栏形态判据拒绝的缝（短语布局）不参与 —— 那是「该按行读」的信号，
+    但横缝更宽时横切仍然合法（横切不读串，见 _split_rows）。
+
+    横切出的每一段递归做同样的决策，直到不再有更宽的缝可切。
+    """
+    if len(blocks) < MIN_BLOCKS_PER_COLUMN * 2:
+        return [blocks]
+
+    header, body = _strip_full_width_top(blocks)
+    if not body:
+        return [blocks]
+    blocks = body
+
+    multi = _try_multi_column(blocks)
+    col_gap = _find_column_gap(blocks)
+    vertical_width = 0.0
+    if multi:
+        # 多栏的缝都是贯穿性的，取最窄的一条做保守比较
+        min_x = min(b.x0 for b in blocks)
+        max_x = max(b.x1 for b in blocks)
+        gaps = _find_all_gaps(blocks, max_x - min_x)
+        # 只统计真正落在段与段之间的缝：全量缝隙里可能有段内的行尾空隙
+        mids = []
+        cols = multi
+        for a, b in zip(cols, cols[1:]):
+            boundary = max(x.x1 for x in a)
+            next_start = min(x.x0 for x in b)
+            if next_start > boundary:
+                mids.append(next_start - boundary)
+        vertical_width = min(mids) if mids else (col_gap[1] - col_gap[0] if col_gap else 0.0)
+    elif col_gap:
+        vertical_width = col_gap[1] - col_gap[0]
+
+    # 方向权威：纵向栏结构可信（多栏 / 两栏形态判据通过）时直接纵切，
+    # 不与横缝比宽度。原因：侧边栏布局里正文行距空隙比栏缝宽（P3 实测
+    # 47-53pt vs 40pt），宽度比较会选横切、把贯穿全高的栏拦腰切断。
+    # 横切只在纵向几何失效（col_gap 被形态判据拒绝）时出场，负责
+    # 页眉之外的「上下分节」（T3 的右栏错位）；页眉/标题剥离已由
+    # _strip_full_width_top 在决策之前完成，不依赖横切
+    row_gaps = [] if col_gap else [
+        g for g in _find_row_gaps(blocks) if _row_gap_allowed(blocks, g, vertical_width)
+    ]
+    horizontal_width = max((b - a for a, b in row_gaps), default=0.0)
+
+    if row_gaps:
+        # 横向更宽 → 沿**达成决策的那一条最宽缝**切一刀，每段递归。
+        # 不能把所有横缝一起切：行与行之间的缝隙（十几 pt）也是横缝，
+        # 一起切会把双栏版面拦腰切成一行一段，每段块数太少、栏检测失效
+        # （实测 T2 三栏被切成 4 个单行段后全部交错）。行缝交给递归 ——
+        # 段内如果没有更宽的横缝，纵向检测自然接管
+        widest = max(row_gaps, key=lambda r: r[1] - r[0])
+        mid = (widest[0] + widest[1]) / 2
+        top = [b for b in blocks if b.cy < mid]
+        bottom = [b for b in blocks if b.cy >= mid]
+        if not top or not bottom:
+            # 一侧为空说明「最宽横缝」其实没把内容分成两份（不应发生，防御）
+            return [blocks]
+        out: list[list[Block]] = []
+        for seg in (top, bottom):
+            out.extend(_xy_split(seg))
+        # 每个出口都必须带上 header —— 横切分支先于结尾的纵向分支执行，
+        # 这里漏了 header 就是直接丢内容（实测 P2 第一行被吞）
+        return ([header] if header else []) + out
+
+    result = [blocks]
+    if multi:
+        result = multi
+    elif col_gap:
+        result = _split_recursive(blocks, col_gap, depth=0)
+    # 剥离出的页眉/全宽标题作为独立段放最前 —— restore 对每段调
+    # _split_columns，页眉段内部无栏可切、按单栏读，天然最先
+    return ([header] if header else []) + result
 
 
 def _split_columns(blocks: list[Block]) -> tuple[list[Block], list[list[Block]]]:
@@ -423,17 +690,20 @@ def restore_reading_order(blocks: list[Block]) -> list[Block]:
     ordered: list[Block] = []
     cursor = 0
     for page_no in sorted(pages):
-        header, columns = _split_columns(pages[page_no])
-        # 顶部横跨块（姓名/标题）先读，再读各栏
-        for block in header:
-            block.read_order = cursor
-            cursor += 1
-            ordered.append(block)
-        for column in columns:
-            for block in _order_within_column(column):
+        # X-Y 交替切分：方向由「哪条缝更宽」决定（_xy_split），段/栏内
+        # 再聚行排序。页眉与横跨章节标题由横向切分自然剥离
+        for segment in _xy_split(pages[page_no]):
+            header, columns = _split_columns(segment)
+            # 顶部横跨块（姓名/标题）先读，再读各栏
+            for block in header:
                 block.read_order = cursor
                 cursor += 1
                 ordered.append(block)
+            for column in columns:
+                for block in _order_within_column(column):
+                    block.read_order = cursor
+                    cursor += 1
+                    ordered.append(block)
 
     for block in sorted(rotated, key=lambda b: (b.page_no, b.y0, b.x0)):
         block.read_order = cursor
