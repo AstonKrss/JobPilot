@@ -20,7 +20,7 @@ import logging
 from collections import Counter
 
 import psycopg
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
@@ -243,7 +243,8 @@ def _build_item(
 def get_radar(
     resume_id: int | None = None,
     include_blocked: bool = False,
-    limit: int = 80,
+    # 负数 limit 会让下游 SQL 直接报错
+    limit: int = Query(default=80, ge=1, le=500),
 ) -> dict:
     """雷达结果。include_blocked=true 时连不可达岗位一起返回（用于解释"为什么这么少"）。"""
     with get_pool().connection() as conn:

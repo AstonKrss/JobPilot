@@ -15,7 +15,7 @@ import time
 from fastapi import APIRouter, HTTPException
 
 from ..config import settings
-from ..db import match_repo
+from ..db import match_repo, repo
 from ..db.pool import get_pool
 from ..match.engine import Decision, rank, reject_summary
 from ..match.relax import compute_relaxations, narrate
@@ -128,6 +128,9 @@ async def list_matches(
     with get_pool().connection() as conn:
         profile = match_repo.get_current_profile(conn, resume_id)
         if profile is None:
+            # 先分清「简历不存在」（404）和「还没解析出画像」（409）
+            if not repo.resume_exists(conn, resume_id):
+                raise HTTPException(status_code=404, detail="简历不存在")
             raise HTTPException(
                 status_code=409,
                 detail="该简历尚无可用画像，请等待解析完成或先调用 reparse",
@@ -251,6 +254,8 @@ async def list_job_scores(
     with get_pool().connection() as conn:
         profile = match_repo.get_current_profile(conn, resume_id)
         if profile is None:
+            if not repo.resume_exists(conn, resume_id):
+                raise HTTPException(status_code=404, detail="简历不存在")
             raise HTTPException(status_code=409, detail="这份简历还没有可用的画像，先等解析完成")
         jobs = match_repo.list_current_job_profiles(conn)
 
@@ -290,6 +295,8 @@ async def list_relaxations(
     with get_pool().connection() as conn:
         profile = match_repo.get_current_profile(conn, resume_id)
         if profile is None:
+            if not repo.resume_exists(conn, resume_id):
+                raise HTTPException(status_code=404, detail="简历不存在")
             raise HTTPException(status_code=409, detail="这份简历还没有可用的画像，先等解析完成")
         jobs = match_repo.list_current_job_profiles(conn)
 

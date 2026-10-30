@@ -12,9 +12,10 @@ import asyncio
 import logging
 import shutil
 import uuid
+import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from ..config import settings
@@ -86,7 +87,7 @@ async def upload_resume(file: UploadFile, background: BackgroundTasks) -> dict:
             conn,
             file_hash=file_hash,
             file_path=str(final_path),
-            file_name=file.filename,
+            file_name=_clean_file_name(file.filename),
             page_count=None,
             source_kind="text_layer",  # 真实类别在解析阶段判定后回写
         )
@@ -102,6 +103,40 @@ def _file_name(file_hash: str, suffix: str = ".pdf") -> str:
     保留真实后缀：DOCX 要能原样打开编辑，扩展名错了 Word 会拒绝。
     """
     return f"{file_hash[:32]}{suffix}"
+
+
+def _clean_file_name(raw: str) -> str:
+    """清洗用户上传的展示用文件名（第三轮测试 3.3）。
+
+    落盘文件名是 SHA256，所以路径穿越"恰好"不成立；但 file_name 会进库、
+    会被前端展示，将来一旦用它拼 Content-Disposition 或导出路径就是坑。
+    不依赖"恰好安全"：剥掉路径成分与控制字符，并限制长度。
+    """
+    name = Path(raw).name
+    name = "".join(ch for ch in name if ch.isprintable() and ch not in '\\"')
+    name = name.strip()
+    return (name or "简历")[:120]
+
+
+def _friendly_parse_error(exc: Exception, is_docx: bool) -> str:
+    """把解析兜底异常映射成用户语言（第三轮测试 3.2）。
+
+    类名（PackageNotFoundError / KeyError）是内部实现，进 UI 只会让用户
+    以为系统坏了。按实测踩到的异常类型逐个映射；映射不上的统一说人话，
+    技术细节已经由调用方记进日志，不需要暴露在界面上。
+    """
+    name = type(exc).__name__
+    if name == "PackageNotFoundError" or isinstance(exc, zipfile.BadZipFile):
+        return (
+            "文件不是有效的 DOCX 结构（可能只是改了扩展名），"
+            "请用 Word/WPS 打开确认后另存为 .docx 再上传"
+        )
+    if name == "KeyError" and is_docx:
+        # 实测：宏文档 / 空 docx 在 python-docx 里都表现为 KeyError（缺必要的包部件）
+        return "文档缺少必要的内容结构（可能是空文档或宏文档），无法解析"
+    if isinstance(exc, MemoryError):
+        return "文件内容过大，解析时内存不足，请精简后重试"
+    return "解析出现内部错误，请稍后重试；若反复出现请换一份文件"
 
 
 async def _parse_resume(resume_id: int, path: Path) -> None:
@@ -202,7 +237,7 @@ async def _parse_resume(resume_id: int, path: Path) -> None:
         _mark_failed(resume_id, exc.user_message)
     except Exception as exc:  # 后台任务里未捕获的异常不会有人看到，必须落库
         logger.exception("简历 %s 解析出现未预期异常", resume_id)
-        _mark_failed(resume_id, f"内部错误：{type(exc).__name__}")
+        _mark_failed(resume_id, _friendly_parse_error(exc, is_docx))
 
 
 def _mark_failed(resume_id: int, message: str) -> None:
@@ -217,7 +252,10 @@ def _mark_failed(resume_id: int, message: str) -> None:
 
 
 @router.get("")
-async def list_resumes(limit: int = 50) -> dict:
+async def list_resumes(
+    # 与 list_jobs 同理：负数 limit 会让 PostgreSQL 直接报错
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
     """简历列表，供界面选择。主简历排在最前并带 is_default 标记。"""
     with get_pool().connection() as conn:
         items = repo.list_resumes(conn, limit)

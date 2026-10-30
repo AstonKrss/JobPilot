@@ -89,6 +89,19 @@ def get_resume_file_path(conn: psycopg.Connection, resume_id: int) -> str | None
     return str(row[0]) if row else None
 
 
+def resume_exists(conn: psycopg.Connection, resume_id: int) -> bool:
+    """简历记录是否真的存在。
+
+    之前 match/review 只看「有没有画像」：画像为 None 时分不清是
+    简历不存在还是没解析完，只能一律回 409 —— 对不存在的简历报
+    「尚无可用画像」是在说胡话。先查存在性（404）再查画像（409），
+    两个语义就分开了。
+    """
+    return conn.execute(
+        "SELECT 1 FROM resume WHERE id = %s", (resume_id,)
+    ).fetchone() is not None
+
+
 def set_page_count(conn: psycopg.Connection, resume_id: int, page_count: int) -> None:
     conn.execute("UPDATE resume SET page_count = %s WHERE id = %s", (page_count, resume_id))
 
@@ -460,6 +473,42 @@ def _jsonb(value) -> psycopg.types.json.Jsonb:
     return psycopg.types.json.Jsonb(value)
 
 
+def _overwrite_job_raw(
+    conn: psycopg.Connection,
+    job_id: int,
+    *,
+    raw_text: str,
+    raw_text_original: str | None,
+    raw_html: str | None,
+    url: str | None,
+    detail_level: str,
+    integrity: dict | None,
+) -> None:
+    """对既有岗位覆盖更新原文。完整度只升不降：先用详情页抓过，
+    之后又被列表页覆盖时不能退回 digest。"""
+    conn.execute(
+        """
+        UPDATE job SET raw_text = %s,
+                       raw_text_original = COALESCE(%s, raw_text_original),
+                       raw_html = COALESCE(%s, raw_html),
+                       url = COALESCE(%s, url),
+                       detail_level = CASE
+                           WHEN %s = 'full' THEN 'full'
+                           ELSE detail_level
+                       END,
+                       -- 完整性结论跟着新文本走。不更新的话，
+                       -- 同一个岗位先被列表页（摘要）覆盖过、
+                       -- 再被详情页（完整）覆盖，留下的还是摘要那次的结论
+                       integrity = CASE WHEN %s::jsonb = '{}'::jsonb
+                                        THEN integrity ELSE %s::jsonb END,
+                       fetched_at = now()
+         WHERE id = %s
+        """,
+        (raw_text, raw_text_original, raw_html, url, detail_level,
+         _jsonb(integrity or {}), _jsonb(integrity or {}), job_id),
+    )
+
+
 def create_job(
     conn: psycopg.Connection,
     *,
@@ -472,7 +521,7 @@ def create_job(
     detail_level: str = "unknown",
     integrity: dict | None = None,
 ) -> tuple[int, bool]:
-    """同源同 ID 已存在则更新原文，返回 (id, 是否新增)。
+    """同源同岗位已存在则更新原文，返回 (id, 是否新增)。
 
     第二个返回值是给「自动发现新岗位」用的：定时扫描时只有真的新增才该提醒，
     老岗位被重新抓到不算新岗位 —— 没有这个标记，每 2 小时都会推一遍同样的岗位。
@@ -480,49 +529,85 @@ def create_job(
     raw_text 存的是**清洗后**的文本（抽取用的是它），raw_text_original 存清洗前。
     两份都留是有代价的（约多一倍字符），但只留一份的代价更大：
     清洗规则改坏之后，既没法复现也没法回归。
+
+    去重为什么不能只靠 (source, source_job_id)
+        手动粘贴和部分列表页抓取没有 source_job_id，第三轮并发测试（3.1）实测
+        check-then-insert 两步之间有竞态窗口：6 线程同时入库同一岗位会插出 6 条。
+        修复分两层：
+        1) 应用层先按 (source, 正文哈希) 查，命中即覆盖更新；
+        2) INSERT 用 ON CONFLICT DO NOTHING 兜底（不指定目标 = 对表上所有唯一
+           索引生效），输掉竞态的请求查回赢家刚插入的行，同样返回 reused。
+        注意唯一键是**正文哈希**而不是 url：实测智联列表页的多个岗位共用同一个
+        列表 URL（job 38/39 是重复的同一 JD，40「安全员」却是不同岗位），
+        按 url 建唯一索引会把真实的不同岗位并成一条。
     """
+    existing_id: int | None = None
     if source_job_id:
         row = conn.execute(
             "SELECT id FROM job WHERE source = %s AND source_job_id = %s",
             (source, source_job_id),
         ).fetchone()
         if row:
-            # 完整度只升不降：先用详情页抓过，之后又被列表页覆盖时不能退回 digest
-            conn.execute(
-                """
-                UPDATE job SET raw_text = %s,
-                               raw_text_original = COALESCE(%s, raw_text_original),
-                               raw_html = COALESCE(%s, raw_html),
-                               url = COALESCE(%s, url),
-                               detail_level = CASE
-                                   WHEN %s = 'full' THEN 'full'
-                                   ELSE detail_level
-                               END,
-                               -- 完整性结论跟着新文本走。不更新的话，
-                               -- 同一个岗位先被列表页（摘要）覆盖过、
-                               -- 再被详情页（完整）覆盖，留下的还是摘要那次的结论
-                               integrity = CASE WHEN %s::jsonb = '{}'::jsonb
-                                                THEN integrity ELSE %s::jsonb END,
-                               fetched_at = now()
-                 WHERE id = %s
-                """,
-                (raw_text, raw_text_original, raw_html, url, detail_level,
-                 _jsonb(integrity or {}), _jsonb(integrity or {}), row[0]),
-            )
-            return int(row[0]), False
+            existing_id = int(row[0])
+    if existing_id is None:
+        # 正文一致才算同一岗位：相同 url 的列表页可能承载不同 JD（见函数注释）
+        row = conn.execute(
+            """
+            SELECT id FROM job
+             WHERE source = %s AND md5(raw_text) = md5(%s)
+             ORDER BY id LIMIT 1
+            """,
+            (source, raw_text),
+        ).fetchone()
+        if row:
+            existing_id = int(row[0])
+
+    if existing_id is not None:
+        _overwrite_job_raw(
+            conn, existing_id,
+            raw_text=raw_text, raw_text_original=raw_text_original,
+            raw_html=raw_html, url=url, detail_level=detail_level,
+            integrity=integrity,
+        )
+        return existing_id, False
 
     row = conn.execute(
         """
         INSERT INTO job (source, source_job_id, url, raw_html, raw_text,
                          raw_text_original, fetched_at, detail_level, integrity)
         VALUES (%s, %s, %s, %s, %s, %s, now(), %s, %s)
+        ON CONFLICT DO NOTHING
         RETURNING id
         """,
         (source, source_job_id, url, raw_html, raw_text, raw_text_original,
          detail_level, _jsonb(integrity or {})),
     ).fetchone()
-    assert row is not None
-    return int(row[0]), True
+    if row is not None:
+        return int(row[0]), True
+
+    # 走到这里说明输掉了并发竞态：另一个事务刚插入同岗位并已提交。
+    # 查回赢家的行，走覆盖更新（内容相同，更新是幂等的），语义与简历上传的
+    # reused 对齐 —— 而不是让 UniqueViolation 变成 500。
+    row = None
+    if source_job_id:
+        row = conn.execute(
+            "SELECT id FROM job WHERE source = %s AND source_job_id = %s",
+            (source, source_job_id),
+        ).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT id FROM job WHERE source = %s AND md5(raw_text) = md5(%s)"
+            " ORDER BY id LIMIT 1",
+            (source, raw_text),
+        ).fetchone()
+    assert row is not None, "ON CONFLICT 触发但查不到既有行：唯一键与查询条件不一致"
+    _overwrite_job_raw(
+        conn, int(row[0]),
+        raw_text=raw_text, raw_text_original=raw_text_original,
+        raw_html=raw_html, url=url, detail_level=detail_level,
+        integrity=integrity,
+    )
+    return int(row[0]), False
 
 
 def save_job_profile(

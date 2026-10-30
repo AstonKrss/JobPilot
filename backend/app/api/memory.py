@@ -22,6 +22,13 @@ router = APIRouter(prefix="/api/memory", tags=["memory"])
 async def summarize(conversation_id: int) -> dict:
     """把一次会话压成情节记忆。消息太少时返回 skipped。"""
     with get_pool().connection() as conn:
+        # summarize_conversation 对"会话不存在"和"消息太少"都返回 None，
+        # 上游分不清，于是不存在的会话也静默 200。先查存在性分开两种语义。
+        exists = conn.execute(
+            "SELECT 1 FROM conversation WHERE id = %s", (conversation_id,)
+        ).fetchone()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
         result = await episode_mem.summarize_conversation(conn, conversation_id)
     if result is None:
         return {

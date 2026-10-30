@@ -56,6 +56,9 @@ async def create_review(
     with get_pool().connection() as conn:
         profile = match_repo.get_current_profile(conn, resume_id)
         if profile is None:
+            # 先分清「简历不存在」（404）和「还没解析出画像」（409）
+            if not repo.resume_exists(conn, resume_id):
+                raise HTTPException(status_code=404, detail="简历不存在")
             raise HTTPException(
                 status_code=409, detail="该简历尚无可用画像，请等待解析完成或先 reparse"
             )

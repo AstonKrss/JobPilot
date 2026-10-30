@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from ..db.pool import get_pool
@@ -50,6 +50,13 @@ def _step(action: str, reason: str, urgency: str = "normal") -> dict:
 @router.post("/next-step")
 async def next_step(payload: NextStepRequest) -> dict:
     """按当前状态给一条"现在做什么"。只会给一条 —— 给三条等于没给。"""
+    # 判定逻辑是纯函数，之前对不存在的 job_id 也照样返回建议（静默 200）。
+    # 给出"下一步"的前提是这个岗位真实存在，先查一次。
+    with get_pool().connection() as conn:
+        if conn.execute(
+            "SELECT 1 FROM job WHERE id = %s", (payload.job_id,)
+        ).fetchone() is None:
+            raise HTTPException(status_code=404, detail="岗位不存在")
     decision = payload.match_decision
     status = payload.app_status
     missed = payload.missed_skills or []
@@ -103,7 +110,11 @@ async def next_step(payload: NextStepRequest) -> dict:
 
 
 @router.get("/similar/{job_id}")
-async def similar_jobs(job_id: int, limit: int = 3) -> dict:
+async def similar_jobs(
+    # 负数 limit 会让 SQL 的 LIMIT 直接报错
+    job_id: int,
+    limit: int = Query(default=3, ge=1, le=20),
+) -> dict:
     """找跟这个岗位相似的岗位，并带上它们各自的投递结果。
 
     为什么用标题向量而不是必备技能重合：技能名是自由文本（「Java」/

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from ..db import repo
@@ -136,7 +136,11 @@ async def sync_chat_logs(payload: ChatLogSync) -> dict:
 
 
 @router.get("")
-async def list_chat_logs(job_id: int, limit: int = 50) -> dict:
+async def list_chat_logs(
+    job_id: int,
+    # 负数 limit 会让 PostgreSQL 直接报错
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
     """工作台用：这个岗位关联的聊天记录，按同步顺序正序展示。"""
     with get_pool().connection() as conn:
         rows = conn.execute(

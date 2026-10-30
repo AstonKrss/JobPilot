@@ -12,18 +12,26 @@
 from __future__ import annotations
 
 import logging
+import zipfile
 from pathlib import Path
 
 from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
+from ..llm.errors import PermanentError
 from .layout import Block
 
 logger = logging.getLogger(__name__)
 
 # 每个段落占的虚拟高度，仅用于让 Block 的排序语义成立
 LINE_HEIGHT = 20.0
+
+# docx 解压后总量的上限（第三轮测试 3.4）。docx 本体有 20MB 上传限制，
+# 但 zip 是压缩格式，40MB 的 zip 炸弹能解出上 GB 的 XML 全量进内存 ——
+# python-docx 官方不提供大小防护，只能在上游自己量。读 zip 目录即可拿到
+# 解压后体积，不需要真的解压。
+MAX_DOCX_UNCOMPRESSED_MB = 64
 
 
 def _iter_block_items(doc):
@@ -42,6 +50,15 @@ def _iter_block_items(doc):
 
 def extract_docx_blocks(path: Path) -> tuple[list[Block], str]:
     """返回 (文本块列表, 来源类型)。来源类型固定为 'docx'。"""
+    with zipfile.ZipFile(path) as zf:
+        uncompressed = sum(info.file_size for info in zf.infolist())
+    if uncompressed > MAX_DOCX_UNCOMPRESSED_MB * 1024 * 1024:
+        # PermanentError：重试同样超限，直接把人话说清楚
+        raise PermanentError(
+            f"该 DOCX 解压后内容约 {uncompressed // (1024 * 1024)}MB，"
+            f"超过 {MAX_DOCX_UNCOMPRESSED_MB}MB 上限，请精简文档后重试",
+            detail=f"uncompressed={uncompressed} bytes",
+        )
     doc = Document(str(path))
     blocks: list[Block] = []
     index = 0

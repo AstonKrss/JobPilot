@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..db import repo
@@ -32,6 +32,25 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 # 这些标题说明抓到的不是岗位页，而是公司介绍 / 招聘专题之类的页面。
 # 它们照样能被 LLM 抽出字段，但抽出来的"岗位"是虚构的，进匹配池只是噪声。
 NON_JOB_TITLE_MARKS = ("公司介绍", "公司简介", "企业介绍", "非招聘", "招聘简章", "关于我们")
+
+# 手动粘贴文本的岗位特征词。命中至少 2 个不同的才算像 JD。
+# 这是 L0 闸门的前置半环：抽取 prompt 要求「title 禁止填 null」，
+# 对一段闲聊文本，模型只能按职责硬编一个岗位名出来 —— 编造的标题
+# 天然能骗过抽取后的标题关键词检查（第三轮测试在 17:57 又抓到现行）。
+# 所以必须在喂给模型**之前**判：闲聊根本不该进抽取这一步。
+JD_SIGNAL_MARKS = (
+    "岗位职责", "任职要求", "工作职责", "岗位要求", "工作内容", "招聘", "诚聘",
+    "薪资", "薪酬", "待遇", "福利", "五险", "双休", "年终奖", "加班",
+    "学历", "经验", "实习", "校招", "社招", "应届", "全职", "兼职", "转正",
+    "简历", "面试", "工作地点", "工作时间", "薪", "K·",
+    "工程师", "专员", "经理", "主管", "助理", "设计师", "管培生", "实习生",
+    "开发", "运营", "销售", "客服", "行政", "人事", "财务", "市场", "编辑",
+)
+
+
+def _job_signal_hits(text: str) -> int:
+    """返回文本中命中的不同岗位特征词数量。"""
+    return len({mark for mark in JD_SIGNAL_MARKS if mark in text})
 
 
 def _reject_non_job(title: str, raw_text: str) -> str | None:
@@ -186,6 +205,20 @@ async def ingest_job(payload: JobIngestRequest) -> dict:
     original_text = text
     text = cleaned
 
+    # L0 前置闸门（只对手动粘贴生效）：平台抓取的内容自带岗位语境，
+    # 且摘要卡片（digest）可能一个特征词都没有，用这条会误杀；
+    # 手动粘贴没有这层语境 —— 闲聊/笔记粘贴进来，模型只会硬编岗位名。
+    if not payload.url and not payload.source_job_id:
+        hits = _job_signal_hits(text)
+        if hits < 2:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "这段内容检测不到岗位特征（职责/要求/薪资/岗位名等），"
+                    "未入库。请确认粘贴的是完整的招聘 JD"
+                ),
+            )
+
     try:
         result = await chat_json(
             JD_SYSTEM_PROMPT,
@@ -259,7 +292,11 @@ async def ingest_job(payload: JobIngestRequest) -> dict:
 
 
 @router.get("")
-async def list_jobs(limit: int = 200, source: str | None = None) -> dict:
+async def list_jobs(
+    # limit 必须卡下界：PostgreSQL 对 LIMIT 负数直接报错，传 -1 就是 500
+    limit: int = Query(default=200, ge=1, le=1000),
+    source: str | None = None,
+) -> dict:
     """岗位列表。source 非空时只返回该平台的岗位（boss / liepin / zhaopin / manual）。"""
     with get_pool().connection() as conn:
         items = repo.list_jobs(conn, limit, source)

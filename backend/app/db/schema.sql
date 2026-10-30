@@ -117,6 +117,20 @@ CREATE TABLE IF NOT EXISTS job (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_job_source_id
     ON job (source, source_job_id) WHERE source_job_id IS NOT NULL;
 
+-- 并发入库去重（第三轮测试 3.1）：入库原本是应用层 check-then-insert，
+-- 并发下两步之间有竞态窗口，同一岗位会插进多条（实测 6 线程插出 6 个 job_id）。
+-- 唯一键用**正文哈希**而不是 url：实测智联列表页的多个岗位共用同一个列表 URL
+-- （job 38/39 是重复的同一 JD，job 40「安全员」却是不同岗位），
+-- 按 url 建唯一索引会把真实的不同岗位并成一条、丢数据。
+-- 正文一致才视为同一岗位；不同正文即使同 URL 也允许并存。
+-- 先清历史重复（保留最早一条）再建索引，否则索引创建会失败、启动即挂。
+DELETE FROM job a USING job b
+ WHERE a.source = b.source
+   AND a.raw_text IS NOT NULL AND a.raw_text = b.raw_text
+   AND a.id > b.id;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_job_content
+    ON job (source, md5(raw_text)) WHERE raw_text IS NOT NULL;
+
 -- 数据完整度：决定这份岗位画像的匹配结果有多可信。
 --   full   = 从详情页抓取，含完整 JD 与技能要求
 --   digest = 从列表页卡片抓取，只有标题/薪资/城市等摘要，没有技能要求
