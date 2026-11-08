@@ -63,6 +63,8 @@ async def chat_stream(payload: ChatRequest) -> StreamingResponse:
                     "jobs": result.get("jobs") or [],
                     "slots": result.get("slots") or {},
                     "steps": result.get("steps") or [],
+                    # direction_hits 决定前端卡片排序（方向内有能投的不把 blocked 置顶）
+                    "direction_hits": result.get("direction_hits"),
                 }
             )
         except Exception as exc:  # noqa: BLE001

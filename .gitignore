@@ -30,3 +30,10 @@ backend/static/_preview*.html
 
 # 本地工具产物
 .box-agent/
+
+# ZCode 工作区元数据（本机生成，非项目内容）
+.zcode/
+
+# 评测产物（时间戳报告：含完整对话回复与岗位数据，属于本机使用痕迹；
+# 关键数字已沉淀在 docs/*report*.md，需要时可重跑 eval/ 再生成）
+eval/results/

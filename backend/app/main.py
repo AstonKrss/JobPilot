@@ -17,6 +17,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import (
     advice,
+    discover,
+    gap,
     workbench,
     memory,
     skills,
@@ -95,6 +97,8 @@ app.include_router(memory.router)
 app.include_router(workbench.router)
 app.include_router(advice.router)
 app.include_router(radar.router)
+app.include_router(discover.router)
+app.include_router(gap.router)
 
 # 静态界面必须挂载在所有路由之后：mount("/") 会匹配一切路径，
 # 先挂就会把 /api/* 也吞掉

@@ -14,6 +14,18 @@
     只用向量：会把三个月前那次闲聊召回；
     只用时间衰减：会漏掉"不接受外包"这种长期有效的信息；
     只用频次：热门记忆永远霸榜。
+
+2026-11-03 重配（docs/agent-eval-diagnosis-2026-10-29.md 4.5）
+    旧权重 0.55/0.25/0.20 实测有两个结构性偏差：
+    1) 正反馈 —— hit_count 只增不减、5 次即饱和，饱和后频次项变成永久加分，
+       "被召回过就更容易被召回"。实测一条 cos=0.764 的记忆输给 cos=0.494
+       的记忆（57 次命中的那条永远第 1）；
+    2) 无下限 —— 无关 query（天气、写代码）也稳定返回 3 条，
+       最高 sim 只有 0.29，噪音照样注入 prompt。
+    修法：相似度低于 MIN_SIM 直接不召回（宁可不带背景，不塞噪音）；
+    频次项乘上「距上次召回」的衰减（60 天半衰期），霸榜记忆不再自我强化；
+    权重让位给相似度（0.70/0.20/0.10）。打分抽成纯函数 _score_one，
+    离线回归见 scripts/check_episode_recall.py（不需要库、不需要向量模型）。
 """
 
 from __future__ import annotations
@@ -30,12 +42,18 @@ from ..match import semantic
 
 logger = logging.getLogger(__name__)
 
-# 召回打分权重。0.55 相似 + 0.25 新鲜度 + 0.20 复用得分为初始值，
-# 需要后续用真实数据校准（这是拍出来的，不是测出来的）
-W_SIM = 0.55
-W_TIME = 0.25
-W_FREQ = 0.20
+# 召回打分权重（2026-11-03 重配，依据见模块 docstring 与诊断文档 4.5）。
+# 旧值 0.55/0.25/0.20：频次项饱和后是永久加分，正反馈霸榜
+W_SIM = 0.70
+W_TIME = 0.20
+W_FREQ = 0.10
 HALF_LIFE_DAYS = 30.0
+# 频次的半衰期比时间项长（60 天）：它表达的是"这条记忆长期有用"，
+# 衰减只为压住霸榜，不是为了遗忘
+FREQ_HALF_LIFE_DAYS = 60.0
+# 相似度阈值：低于它的记忆一律不召回。阈值下全部落空就返回空，
+# 让 prompt 干净 —— 无关 query 带 3 条噪音背景，比不带背景更糟
+MIN_SIM = 0.35
 
 SUMMARIZE_PROMPT = """把这段求职咨询对话压成一条记忆。只输出 JSON：
 
@@ -49,14 +67,53 @@ SUMMARIZE_PROMPT = """把这段求职咨询对话压成一条记忆。只输出 
 4. 没有实质结论时 facts 可以是空数组"""
 
 
-def _key_time(created_at: datetime | None) -> float:
-    """时间衰减：30 天半衰期。未来时间按 1.0 处理（时钟偏差不该被惩罚）。"""
+def _decay(created_at: datetime | None, half_life_days: float,
+           now: datetime | None = None) -> float:
+    """指数时间衰减。None 按不过期、未来时间按 1.0 处理（时钟偏差不该被惩罚）。
+
+    now 可注入：离线回归测试用固定时钟，否则每次跑结果都会漂。
+    """
     if created_at is None:
         return 1.0
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     dt = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
     days = max((now - dt).total_seconds() / 86400.0, 0.0)
-    return math.exp(-days / HALF_LIFE_DAYS)
+    return math.exp(-days / half_life_days)
+
+
+# 旧名保留：时间项的衰减（30 天半衰期），agent.py 之外没有别的调用方
+def _key_time(created_at: datetime | None) -> float:
+    return _decay(created_at, HALF_LIFE_DAYS)
+
+
+def _score_one(
+    sim: float,
+    created_at: datetime | None,
+    hit_count: int,
+    last_hit_at: datetime | None,
+    now: datetime | None = None,
+) -> tuple[float, bool]:
+    """单条记忆的召回得分。返回 (score, 是否保留)。
+
+    相似度不足直接判出局（返回 False），不再参与排序 —— 这是在"过滤"
+    而不是"压低分数"：压 0.1 分还是会被时间项捞回来（实测教训）。
+
+    频次项 = min(命中/5, 1) × exp(-距上次召回天数 / 60)。分子表达
+    "常用"，衰减表达"最近常用"—— 57 次命中但 90 天没被用到的记忆，
+    加成从旧公式的 0.20 掉到 0.02，正反馈链条被掐断。
+    """
+    if sim < MIN_SIM:
+        return 0.0, False
+    freq = 0.0
+    if hit_count and hit_count > 0:
+        anchor = last_hit_at or created_at
+        freq = min(hit_count / 5.0, 1.0) * _decay(anchor, FREQ_HALF_LIFE_DAYS, now)
+    score = (
+        W_SIM * sim
+        + W_TIME * _decay(created_at, HALF_LIFE_DAYS, now)
+        + W_FREQ * freq
+    )
+    return score, True
 
 
 def _to_bytes(vec: list[float]) -> bytes | None:
@@ -129,10 +186,14 @@ async def summarize_conversation(
 
 
 def recall(conn: psycopg.Connection, query: str, top_k: int = 3) -> list[dict]:
-    """按「相似 + 新鲜度 + 复用次数」召回，返回最多 top_k 条。"""
+    """按「相似 + 新鲜度 + 衰减后的复用次数」召回，返回最多 top_k 条。
+
+    相似度低于 MIN_SIM 的一律不进结果；全部低于阈值就返回空列表，
+    由调用方决定"没有背景"怎么表达 —— 这里不负责凑数。
+    """
     rows = conn.execute(
         """
-        SELECT id, topic, summary, facts, embedding, created_at, hit_count
+        SELECT id, topic, summary, facts, embedding, created_at, hit_count, last_hit_at
           FROM episode ORDER BY id DESC LIMIT 200
         """
     ).fetchall()
@@ -144,11 +205,9 @@ def recall(conn: psycopg.Connection, query: str, top_k: int = 3) -> list[dict]:
     for r in rows:
         evec = _from_bytes(r[4])
         sim = semantic.cosine(qvec, evec) if qvec and evec else 0.0
-        score = (
-            W_SIM * sim
-            + W_TIME * _key_time(r[5])
-            + W_FREQ * min((r[6] or 0) / 5.0, 1.0)
-        )
+        score, keep = _score_one(sim, r[5], r[6] or 0, r[7])
+        if not keep:
+            continue
         scored.append({
             "id": r[0], "topic": r[1], "summary": r[2], "facts": r[3] or [],
             "created_at": r[5], "score": round(score, 4), "sim": round(sim, 3),

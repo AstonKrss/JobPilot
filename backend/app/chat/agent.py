@@ -21,6 +21,8 @@ import logging
 
 from ..config import settings
 from ..db import conversation_repo
+from ..db import repo
+from ..discover import agent as discover_agent
 from ..memory import episode as episode_mem
 from ..memory import extract, profile_repo, writer
 from ..db import match_repo
@@ -41,6 +43,7 @@ PLAN_SYSTEM_PROMPT = """你是求职助手的规划器。根据用户消息和�
   "resume_id": 数字或 null,
   "clarify": "缺少关键信息时，先问用户的一句话；信息足够执行检索则填 null",
   "chat": "不需要检索时（闲聊、追问、感谢），给一句直接回复；需要检索则填 null",
+  "action": "用户要求你**主动出去找新岗位**（如「帮我主动去官网找岗位」「自动搜一搜各公司官网有没有新岗位」）时填 "discover"；只查现有岗位库不填。与其他字段的关系：action=discover 优先执行，此时 clarify/chat 都填 null",
   "profile_updates": [
     {"key": "槽位名", "op": "replace|add|remove", "value": 值,
      "modality": "exclusive|additive|tentative", "evidence": "用户原话片段"}
@@ -50,11 +53,22 @@ PLAN_SYSTEM_PROMPT = """你是求职助手的规划器。根据用户消息和�
 判定标准：
 - 用户表达了岗位方向（如"想找 agent 相关的"）或目标城市，就更新对应字段。
 - intent 只有一个字段，装不下就概括成"XX 方向"。
+- **intent 只能来自用户本轮消息或已有的会话槽位**。【过往结论】这类召回背景
+  只是历史参考，不能直接当成本轮意图 —— 用户这轮没说方向、历史槽位里也没有时，
+  就算召回里有旧方向，也走 clarify 问一句（问句里可以带上旧方向作为选项）。
+- 用户让你**主动出去找新岗位**（"帮我主动找""自动去各公司官网看看有没有新岗位"）
+  → action 填 "discover"，clarify 与 chat 都填 null。**这条优先于"缺方向就 clarify"**：
+  主动搜索不依赖方向 —— 没有方向也直接执行，抓回来的岗位按画像与城市筛；
+  召回背景里有旧方向同样不妨碍执行。
 - **只要 intent 有了就足够执行检索**，城市留空表示"不按城市限制"，clarify 填 null。
   不要因为用户没说城市就反问 —— 用户问的是方向，先把方向上的岗位捞给他看，
   城市的事可以在结果里说明（"这几个在佛山，你设的是深圳"）。
 - 只有当 intent 和历史槽位里都没有岗位方向时才 clarify，问"想找什么方向的岗位"。
 - 用户在追问上次的结果、说谢谢、闲聊时，chat 给一句自然回复，clarify 填 null。
+- 与求职无关的请求（写代码、讲算法题、常识问答、闲聊话题）：chat 用一句话回应
+  并拉回求职主题，**不执行任务本身**——不写代码、不给步骤、不展开解释，
+  控制在 60 字以内。用户问"帮我写个快排"，正确回应是"代码不归我管，不过刷题
+  是为了找工作吧？目前简历和方向要不要帮你看看"，而不是真的写快排。
 
 profile_updates 只记**需要长期记住的求职偏好**，没有就填空数组 []：
 - key 只能取：cities / job_nature / salary_floor / edu_level / work_auth /
@@ -108,13 +122,23 @@ async def _semantic_alignment(profile: dict, jobs: list[dict]) -> dict:
         return {}
 
 
-def _pick_resume(profiles: dict[int, dict], intent: str) -> tuple[int | None, dict]:
-    """多份简历时，按意图与简历证据的向量相似度选最相关的。"""
+def _pick_resume(profiles: dict[int, dict], intent: str, default_id: int | None = None) -> tuple[int | None, dict]:
+    """多份简历时选哪份来算匹配。
+
+    优先级（2026-11-08 真实使用模拟发现的缺陷）：**用户标记的主简历 > 语义相似 > 最新**。
+    原来纯按"意图 × 简历证据"的向量相似度选，实测选错了：库里同时有测试样例
+    （sample_resume.pdf，Go/K8s/Kafka 模板）和真实主简历（Java/Spring Boot 21 项），
+    样例的技能词表恰好和"后端"语义更近，于是对话链路全程用样例算缺口 ——
+    而工作台用的是主简历，同一份岗位两处看到两套"你缺什么"。主简历是用户
+    明确的意思表示，它的优先级高于任何自动推断；语义选择只在没有主简历时兜底。
+    """
     if not profiles:
         return None, {}
     if len(profiles) == 1:
         resume_id = next(iter(profiles))
         return resume_id, {"reason": "库里只有这一份"}
+    if default_id and default_id in profiles:
+        return default_id, {"reason": "用你标记的主简历"}
     if not intent:
         first = max(profiles)
         return first, {"reason": "未指定方向，默认用最新一份"}
@@ -129,7 +153,7 @@ def _pick_resume(profiles: dict[int, dict], intent: str) -> tuple[int | None, di
         score = cosine(intent_vector, vector)
         if score > best_score:
             best_id, best_score = resume_id, score
-    return best_id, {"reason": "按意图与简历内容的语义相关度选出", "similarity": round(best_score, 3)}
+    return best_id, {"reason": "按意图与简历内容的语义相关度选出（未设主简历）", "similarity": round(best_score, 3)}
 
 
 # 召回层参数
@@ -360,6 +384,24 @@ async def handle_message(
     cities = plan_data.get("cities") or slots.get("cities") or []
     clarify = (plan_data.get("clarify") or "").strip()
     chat_reply = (plan_data.get("chat") or "").strip()
+    # discover = 用户要求"主动出去找新岗位"。它是行为出口，与检索互斥：
+    # 检索回答"库里有什么"，discover 回答"外面新出现了什么"
+    action = (plan_data.get("action") or "").strip().lower()
+
+    # 意图来源合法性由代码判定，不信任模型自报（R7：prompt 规则在长上下文里
+    # 会漂移——「召回背景不能当意图」写了三遍，实测仍间歇性越权）。
+    # 判据：本轮槽位原本没有 intent、且模型给的意图词在用户消息里找不到任何
+    # 字面片段 → 这个意图只能来自召回背景/模型脑补 → 丢弃并强制 clarify。
+    # 误伤面：「看看有没有适合我的」这类无方向消息本来就该 clarify，行为一致。
+    if intent and not slots.get("intent"):
+        pieces = _fragments(intent)
+        if pieces and not any(p in user_text for p in pieces):
+            logger.info("意图来源拦截：模型意图「%s」的字面片段不在用户消息里，判为召回污染", intent)
+            intent = None
+            slots.pop("intent", None)
+            if not clarify:
+                clarify = "想找什么方向的岗位？给我一个关键词就行（后端 / 产品 / 数据分析），我按这个方向去筛。"
+
     if intent:
         slots["intent"] = intent
     if cities:
@@ -368,8 +410,11 @@ async def handle_message(
     # 意图和历史槽位都没有方向时，不要用一个空意图去检索。
     # 原来的写法会用空意图走完整条管线，把全库按简历分数倒出来 ——
     # 用户问"佛山有什么岗位"，得到的是一堆和他想找的方向无关的岗位，
-    # 而真正的答案应该是"你想找什么方向"
-    if not intent and not clarify and not chat_reply and not slots.get("intent"):
+    # 而真正的答案应该是"你想找什么方向"。
+    # action=discover 例外：主动去官网抓新岗位不依赖方向（抓回来按画像筛），
+    # 兜底 clarify 若在这里先把 clarify 填上，discover 分支就永远进不去
+    # （实测教训：PlanAgent 正确输出了 discover，回复却还是反问方向）
+    if not intent and not clarify and not chat_reply and not slots.get("intent") and action != "discover":
         clarify = (
             "想找什么方向的岗位？给我一个关键词就行（后端 / 产品 / 数据分析），"
             "我按这个方向去筛。"
@@ -423,8 +468,34 @@ async def handle_message(
             )
             await step(f"{len(written['pending'])} 条表述不确定，先挂起")
 
+    # ---- 主动发现：出去官网抓新岗位 ----
+    if action == "discover" and not clarify:
+        jobs_payload: list[dict] = []
+        await step("主动扫描官网招聘源…")
+        try:
+            summary = await discover_agent.run_round(trigger="chat", notify=notify)
+        except RuntimeError as exc:
+            # 上一轮还在跑（模块级锁）。如实相告，不假装跑完
+            reply = str(exc)
+        else:
+            reply = discover_agent.format_reply(summary)
+            # 对话卡片走第四种类型 discovered：与检索结果的三栏区分开，
+            # 徽章显示「官网新发现」，雷达判定到发现页看（同口径）
+            jobs_payload = [
+                {
+                    "job_id": j["job_id"],
+                    "title": j["title"],
+                    "company": j.get("company"),
+                    "city": j.get("city"),
+                    "url": j.get("url"),
+                    "column": "discovered",
+                    "urgent": bool(j.get("urgent")),
+                }
+                for j in summary.get("new_jobs", [])[:6]
+            ]
+            slots["last_discover_run"] = summary.get("run_id")
     # ---- 不需要检索：闲聊/追问 ----
-    if chat_reply and not clarify:
+    elif chat_reply and not clarify:
         reply = chat_reply
         jobs_payload: list[dict] = []
     # ---- 缺关键信息：先问再做，不猜 ----
@@ -443,7 +514,9 @@ async def handle_message(
 
 
         await step("挑选最相关的简历…")
-        resume_id, resume_note = _pick_resume(profiles, intent or "")
+        # 主简历优先（见 _pick_resume docstring：语义选择曾把测试样例选到真简历前面）
+        default_rid = repo.get_default_resume_id(conn)
+        resume_id, resume_note = _pick_resume(profiles, intent or "", default_rid)
         if resume_id is None:
             reply = "库里还没有已解析的简历。先在「简历」页上传一份 PDF，我再帮你找岗位。"
             jobs_payload = []
@@ -559,6 +632,7 @@ async def handle_message(
                 direction_hits=direction_hits,
                 profile_block=_profile_block(prof),
                 recall_block=slots.get("recall_block") or "",
+                cities_by_id={int(j.get("job_id") or 0): j.get("city") for j in candidate_jobs},
             )
             by_id = {int(j.get("job_id") or 0): j for j in candidate_jobs}
             jobs_payload = [
@@ -675,17 +749,24 @@ async def _compose(
     profile_block: str = "",
     recall_block: str = "",
     direction_hits: int | None = None,
+    cities_by_id: dict[int, str | None] | None = None,
 ) -> str:
     """把检索结果写成回复。模型失败时退回模板，保证一定有回复。
 
     profile_block / recall_block 由调用方传入，不在这里从头查 ——
     它们是会话开场时算好的固定前缀，会话中不该再变（变了服务端缓存全失效）。
+
+    cities_by_id 必须传：REPLY 提示词要求按「岗位名（城市，分数）」格式输出，
+    结果行里却不给城市的话，模型只能编一个数据属性 —— 评测抓到过它对着
+    有城市的岗位说"城市信息缺失"。缺失就明写「城市未标注」，不让模型猜。
     """
     lines: list[str] = []
     for r in top:
         url = (urls or {}).get(r.job_id)
+        city = (cities_by_id or {}).get(r.job_id)
+        city_shown = str(city) if city else "城市未标注"
         lines.append(
-            f"- {r.title or r.company or '未命名岗位'}（{r.company or ''}，{r.score if r.score is not None else '-'} 分）"
+            f"- {r.title or r.company or '未命名岗位'}（{city_shown}，{r.company or ''}，{r.score if r.score is not None else '-'} 分）"
             + (f" 链接：{url}" if url else "")
         )
     summary = "\n".join(lines) if lines else "（这个方向上没有能投的岗位）"

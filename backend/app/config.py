@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     # 决策已定：单份简历成本上限 0.5 元。用于超限告警，不用于掐断调用
     cost_limit_per_resume: float = 0.5
 
+    # ---- DiscoverAgent：主动官网抓取（2026-11-08）----
+    # 对目标网站保持礼貌：单域请求间隔、诚实 UA、每轮总预算硬出口
+    discover_user_agent: str = "JobPilot/0.1 (local personal job search; contact: local user)"
+    discover_timeout_s: float = 15.0
+    discover_rate_limit_s: float = 2.0     # 同一域名的最小请求间隔
+    discover_max_fetches: int = 50         # 每轮总抓取上限（含列表页与摘要页）
+    discover_max_listings: int = 40        # 每轮入库条目上限
+    discover_max_pages_per_source: int = 3
+
 
 settings = Settings()
 settings.upload_dir.mkdir(parents=True, exist_ok=True)

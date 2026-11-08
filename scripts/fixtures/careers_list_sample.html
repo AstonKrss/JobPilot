@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!-- 合成的 SSR 招聘列表页样例：为 extract_job_anchors 的离线回归构造。
+     包含：3 个真岗位链接（路径与锚文本都带岗位词）、1 个锚文本带词但属入口页的链接、
+     噪声链接（登录/关于/外链协议）、一个无 href 的 a。断言的是预筛行为，不是 LLM 提取。 -->
+<head><title>XX科技 - 加入我们</title></head>
+<body>
+  <nav>
+    <a href="/login">登录</a>
+    <a href="/about">关于我们</a>
+    <a href="javascript:void(0)">更多</a>
+    <a>没有href</a>
+  </nav>
+  <main>
+    <h1>当前招聘职位</h1>
+    <ul>
+      <li><a href="/job/backend-senior">高级后端开发工程师</a></li>
+      <li><a href="/position/data-intern">数据分析实习生（佛山）</a></li>
+      <li><a href="/careers/test-engineer?ref=portal">测试工程师（急招）</a></li>
+      <li><a href="/careers">招聘官网</a></li>
+    </ul>
+    <a href="https://partner.example.com/job/other">合作伙伴岗位</a>
+  </main>
+</body>
+</html>

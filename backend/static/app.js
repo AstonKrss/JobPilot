@@ -109,6 +109,7 @@ function enterRadar() {
   loadRadar();
   loadRadarPlan();
   loadAfterPanel();
+  loadDiscover();
 }
 
 document.querySelectorAll('.tab').forEach((tab) => {
@@ -121,6 +122,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
       loadWorkbenchStats();
     }
     if (tab.dataset.view === 'radar') enterRadar();
+    if (tab.dataset.view === 'review') loadGapPriority();
   });
 });
 
@@ -1442,6 +1444,87 @@ async function loadWorkbench(jobId) {
   }
 }
 
+const GAP_STATUS_LABEL = { can_explain: '能讲清', used_shallow: '用过但不深', never: '没接触', none: '未评' };
+const GAP_TAG_LABEL = { '基础': '基础', '进阶': '进阶', '深入': '深入' };
+
+function renderGapExpand(d) {
+  const groups = (d.skills || []).map((s) => {
+    const items = (s.items || []).map((it) => {
+      const cur = it.status || 'none';
+      return `
+      <div class="item" style="padding:6px 0;border-bottom:1px dashed var(--line)">
+        <div class="item-meta">${esc(it.text)} <span class="badge ${it.tag === '基础' ? 'ok' : it.tag === '深入' ? 'warn' : ''}">${esc(it.tag || '')}</span></div>
+        <select data-gap-item="${esc(it.item_hash || '')}" data-gap-text="${esc(it.text)}" data-gap-skill="${esc(s.norm || '')}"
+                style="margin-top:4px;max-width:220px">
+          ${['none', 'never', 'used_shallow', 'can_explain'].map((v) =>
+            `<option value="${v}" ${cur === v ? 'selected' : ''}>${GAP_STATUS_LABEL[v]}</option>`).join('')}
+        </select>
+      </div>`;
+    }).join('');
+    return `<div style="margin-top:10px"><strong>${esc(s.skill)}</strong>${s.expanded ? '' : ' <span class="item-meta">（未展开）</span>'}${items}</div>`;
+  }).join('');
+  const truncNote = d.truncated ? '<div class="item-meta missed">必备技能较多，只展开了前 8 项 —— 先把最重要的吃透。</div>' : '';
+  const savedNote = (d.skills || []).some((s) => (s.items || []).some((it) => it.status))
+    ? '<div class="item-meta ok-text">已恢复你上次的自评。</div>' : '';
+  // digest 岗（列表页摘要）没有技能清单是常态：给下一步而不是干巴巴一句话
+  const emptyGap = d.detail_level === 'digest'
+    ? '<div class="empty">这是列表页摘要，还没抓到完整 JD，所以看不到技能要求。点上方「原站链接」打开详情页，浏览器扩展会自动补全；或把 JD 粘贴进「岗位」页。</div>'
+    : '<div class="empty">这个岗位没有列出必备技能。</div>';
+  return `
+    <p class="hint">${esc(d.disclaimer || '')}</p>
+    ${savedNote}${truncNote}
+    ${groups || emptyGap}
+    <div class="row" style="margin-top:10px">
+      <button class="small primary" data-gap-save="${d.resume_id}">保存自评</button>
+      <span class="item-meta">自评只保存在本机，用来排「学习优先级」</span>
+    </div>`;
+}
+
+function bindGapSave(box, resumeId) {
+  const btn = box.querySelector('[data-gap-save]');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const rows = [...box.querySelectorAll('select[data-gap-item]')]
+      .map((sel) => ({
+        item: sel.dataset.gapText,
+        skill: sel.dataset.gapSkill,
+        item_hash: sel.dataset.gapItem,
+        status: sel.value,
+      }))
+      .filter((r) => r.status !== 'none' && r.item_hash);
+    if (!rows.length) { toast('先选至少一条自评'); return; }
+    await withLoading(btn, '保存中…', async () => {
+      const d = await api('/api/gap/assess', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resume_id: Number(resumeId) || 0, rows }),
+      });
+      toast(`已保存 ${d.saved} 条自评`);
+    });
+  });
+}
+
+function loadGapPriority() {
+  const box = document.getElementById('gap-priority-box');
+  if (!box) return;
+  api('/api/gap/priority').then((d) => {
+    if (!d.items || !d.items.length) {
+      box.innerHTML = '<div class="empty">还没有可排的条目：先在工作台「展开为具体能力」里自评几条。</div>';
+      return;
+    }
+    box.innerHTML = d.items.map((it) => `
+      <div class="item">
+        <div class="item-meta">
+          <b>${esc(it.item)}</b>
+          <span class="badge ${it.status === 'never' ? 'bad' : 'warn'}">${esc(it.status_label)}</span>
+          <span style="margin-left:auto">${it.jobs_n} 个在架岗位要求</span>
+        </div>
+        <div class="item-meta">${esc(it.skill)}${it.sample_jobs && it.sample_jobs.length ? ` · 例如：${esc(it.sample_jobs.join('、'))}` : ''}</div>
+      </div>`).join('');
+  }).catch((e) => {
+    box.innerHTML = `<div class="empty">${esc(e.message || '加载失败')}</div>`;
+  });
+}
+
 function renderWorkbench(jobId, job, matches, appRes, chatlogs, nextStep, similar) {
   const body = document.getElementById('wb-body');
   const profile = (job && job.profile) || {};
@@ -1536,6 +1619,8 @@ function renderWorkbench(jobId, job, matches, appRes, chatlogs, nextStep, simila
     <div class="panel">
       <div class="sec-title">投递前判断</div>
       <div class="item-meta" style="margin-bottom:10px">技能缺口：${gapHtml}</div>
+      ${match ? `<button class="small" data-gap-expand="${jobId}">展开为具体能力自查</button>
+      <div id="wb-gap-detail" style="margin-top:10px"></div>` : ''}
       ${simHtml}
       <div class="row" style="margin-top:14px">
         ${applied
@@ -1559,6 +1644,31 @@ function renderWorkbench(jobId, job, matches, appRes, chatlogs, nextStep, simila
            <p class="hint">由浏览器扩展自动同步，最后一次同步的整段对话都在这里。</p>`
         : '<div class="empty">还没有同步到这个岗位的聊天记录。在招聘网站的沟通页打开「帮我回复」面板，它会自动把最近消息同步过来。</div>'}
     </div>`;
+
+  // 技术栈补漏：把缺口名词展开为可自查的具体能力（懒加载，结果只写局部容器）。
+  // 自评三态落库后跨岗位复用 —— 条目文本不变，同一能力换个岗位不再重新评
+  body.querySelectorAll('[data-gap-expand]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const jobId = Number(btn.dataset.gapExpand) || 0;
+      const resumeId = Number(document.getElementById('wb-resume').value) || 0;
+      const box = document.getElementById('wb-gap-detail');
+      if (!jobId || !resumeId || !box) return;
+      if (box.dataset.loaded === '1') { box.classList.toggle('hidden'); return; }
+      await withLoading(btn, '展开中…', async () => {
+        try {
+          const d = await api('/api/gap/expand', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ job_id: jobId, resume_id: resumeId }),
+          });
+          box.innerHTML = renderGapExpand(d);
+          box.dataset.loaded = '1';
+          bindGapSave(box, resumeId);
+        } catch (e) {
+          box.innerHTML = `<div class="empty" style="color:var(--danger)">${esc(e.message || '展开失败')}</div>`;
+        }
+      });
+    });
+  });
 
   // 已投 / 撤销：只有一个动作。
   // 首次走 POST，已存在走 PATCH（接口幂等，重复点不会造出多条记录）
@@ -1764,29 +1874,37 @@ function traceHtml(steps, running) {
 }
 
 /** 岗位以紧凑卡片嵌在回复里，可点链接投递 */
-function renderChatJobs(jobs) {
+function renderChatJobs(jobs, directionHits) {
   if (!jobs || !jobs.length) return '';
   const label = { pass: '通过', confirm: '待确认', reject: '否决' };
   const cls = { pass: 'ok', confirm: 'warn', reject: 'bad' };
-  // 方向全不匹配时：blocked（方向对但投不进）排在最前 —— 它们是回复的主角；
-  // off_direction 的 fit 卡片排到最后。后端排好的顺序在这里保持，不再按原序
-  const rank = (j) => (j.column === 'blocked' ? 0 : j.off_direction ? 2 : 1);
+  // 方向全不匹配（directionHits==0）时：blocked（方向对但投不进）排在最前 ——
+  // 它们是回复的主角。方向内有能投的（>0）时保持后端顺序，不再置顶：
+  // 否则回复文字说"最值得看 Java"，视觉上却是"投不进"的卡片打头，自相矛盾
+  // （2026-11-08 真实使用模拟发现）。discovered 卡片永远在前（对话的主角）。
+  const rank = (j) =>
+    j.column === 'discovered' ? 0
+      : directionHits == null || directionHits === 0
+        ? (j.column === 'blocked' ? 0 : j.off_direction ? 2 : 1)
+        : (j.off_direction ? 2 : 1);
   jobs = [...jobs].sort((a, b) => rank(a) - rank(b));
   return `<div class="chat-jobs">${jobs.map((j) => {
-    // 三栏：fit = 能投；blocked = 方向对但卡住。后者不显示「去投递」——
-    // 引导用户去投一个被判定为进不去的岗位，等于让系统自己打自己的脸。
-    // 卡点（blockers）必须直接可见，因为这一栏存在的意义就是「告诉你差在哪」
+    // 四种卡片：fit = 能投；blocked = 方向对但卡住；discovered = 官网主动搜索的新发现
+    // （与检索结果区分开：没有分数判定，徽章标「官网新发现」，雷达判定去发现页看同口径卡片）
     const isBlocked = j.column === 'blocked';
+    const isDiscovered = j.column === 'discovered';
     return `
     <div class="chat-job${isBlocked ? ' blocked' : ''}">
       <div class="chat-job-head">
         <span class="job-name-text">${esc(j.title || '未命名岗位')}</span>
         ${isBlocked
           ? `<span class="badge bad">方向对 · 投不进</span>`
-          : j.off_direction
-            ? `<span class="badge warn">不是这个方向 · 能投</span>`
-            : `<span class="badge ${cls[j.decision] || ''}">${label[j.decision] || j.decision}</span>`}
-        ${!isBlocked && j.score != null ? `<span class="score">${j.score} 分</span>` : ''}
+          : isDiscovered
+            ? `<span class="badge ok">官网新发现${j.urgent ? ' · 急招' : ''}</span>`
+            : j.off_direction
+              ? `<span class="badge warn">不是这个方向 · 能投</span>`
+              : `<span class="badge ${cls[j.decision] || ''}">${label[j.decision] || j.decision || ''}</span>`}
+        ${!isBlocked && !isDiscovered && j.score != null ? `<span class="score">${j.score} 分</span>` : ''}
         ${!isBlocked && j.url ? `<a class="apply-link" href="${cleanJobUrl(j.url)}" target="_blank" rel="noreferrer">去投递 ↗</a>` : ''}
       </div>
       <div class="item-meta">
@@ -1940,7 +2058,7 @@ async function sendChat(text) {
           const finalSteps = evt.steps || steps;
           ctx.body.innerHTML =
             `${traceHtml(finalSteps, false)}<div class="msg-text">${linkify(esc(evt.reply || '')).replace(/\n/g, '<br>')}</div>` +
-            renderChatJobs(evt.jobs);
+            renderChatJobs(evt.jobs, evt.direction_hits);
           addMsgActions(ctx, evt.reply || '');
           scrollToBottom();
         } else if (evt.type === 'error') {
@@ -1962,7 +2080,7 @@ async function sendChat(text) {
       const finalSteps = data.steps || steps;
       ctx.body.innerHTML =
         `${traceHtml(finalSteps, false)}<div class="msg-text">${linkify(esc(data.reply || '')).replace(/\n/g, '<br>')}</div>` +
-        renderChatJobs(data.jobs);
+        renderChatJobs(data.jobs, data.direction_hits);
       addMsgActions(ctx, data.reply || '');
     } catch (e2) {
       ctx.body.innerHTML = `<div class="msg-text" style="color:var(--danger)">${esc(e2.message || e.message)}</div>`;
@@ -2291,6 +2409,180 @@ document.getElementById('btn-radar-refresh')?.addEventListener('click', () => {
   loadRadar();
 });
 
+/* ---------- 主动搜索（DiscoverAgent，官网直达） ----------
+   与扩展「一键发现」的分工：那边去招聘平台搜索（需要浏览器登录态），
+   这里去公司官网招聘页直抓（后端 httpx，限速 + 预算硬出口）。
+   进度用 chat 的 SSE reader 模式；判定复用雷达卡片，不在这里重算。 */
+const discoverState = { running: false, lastSummary: null };
+
+async function loadDiscover() {
+  try {
+    const data = await api('/api/discover/sources');
+    renderDiscoverSources(data.items || []);
+    const runs = await api('/api/discover/runs?limit=8');
+    renderDiscoverRuns(runs.items || []);
+    const last = (runs.items || [])[0];
+    if (last && last.jobs_found > 0 && last.summary && last.summary.new_jobs) {
+      renderDiscoverResults(last.summary);
+    }
+  } catch (e) {
+    document.getElementById('discover-sources').innerHTML = `<div class="empty">${esc(e.message || '加载失败')}</div>`;
+  }
+}
+
+function renderDiscoverSources(items) {
+  document.getElementById('discover-src-count').textContent = String(items.length);
+  const box = document.getElementById('discover-sources');
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">还没有来源。用下面一行添加：公司名 + 招聘列表页地址。</div>';
+    return;
+  }
+  box.innerHTML = items.map((s) => {
+    const statusMap = { ok: ['ok', '正常'], failed: ['bad', '失败'], unsupported: ['warn', '抓不了'] };
+    const st = statusMap[s.last_status] || ['', '未扫'];
+    return `
+    <div class="item">
+      <div class="item-head">
+        <strong>${esc(s.name)}</strong>
+        <span class="badge ${st[0]}">${st[1]}${s.last_found != null ? ` · ${s.last_found} 条` : ''}</span>
+        <label class="check" style="margin-left:auto">
+          <input type="checkbox" data-src-toggle="${s.id}" ${s.enabled ? 'checked' : ''}> 启用
+        </label>
+      </div>
+      <div class="item-meta">${esc(s.url)} · 适配器 ${esc(s.adapter || 'auto')}</div>
+      ${s.last_error ? `<div class="item-meta missed">上次：${esc(s.last_error)}</div>` : ''}
+      ${s.note ? `<div class="item-meta">${esc(s.note)}</div>` : ''}
+    </div>`;
+  }).join('');
+  box.querySelectorAll('[data-src-toggle]').forEach((cb) => {
+    cb.addEventListener('change', async (ev) => {
+      const id = ev.currentTarget.dataset.srcToggle;
+      await api(`/api/discover/sources/${id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: ev.currentTarget.checked }),
+      }).catch((e) => setStatus('discover-status', e.message || '保存失败', 'bad'));
+    });
+  });
+}
+
+function renderDiscoverResults(summary) {
+  const box = document.getElementById('discover-results');
+  const jobs = summary.new_jobs || [];
+  if (!jobs.length) {
+    box.innerHTML = '<div class="empty">这一轮没有新岗位（老岗位重抓不算新）。</div>';
+    return;
+  }
+  box.innerHTML = jobs.map((j) => `
+    <div class="item">
+      <div class="item-head">
+        <strong>${esc(j.title)}</strong>
+        ${j.urgent ? '<span class="badge bad">急招</span>' : ''}
+        ${j.fresh ? '<span class="badge ok">7 天内新发布</span>' : ''}
+        <button class="small" data-workbench="${j.job_id}" style="margin-left:auto">工作台</button>
+      </div>
+      <div class="item-meta">${esc([j.company, j.city].filter(Boolean).join(' · '))}
+        ${j.published_at ? ` · 发布 ${esc(String(j.published_at).slice(0, 10))}` : ''}</div>
+      ${j.url ? `<div class="item-meta"><a href="${esc(j.url)}" target="_blank" rel="noreferrer">官网详情 ↗</a></div>` : ''}
+    </div>`).join('');
+}
+
+function renderDiscoverRuns(runs) {
+  const box = document.getElementById('discover-runs');
+  if (!runs.length) {
+    box.innerHTML = '<div class="empty">还没有跑过。</div>';
+    return;
+  }
+  box.innerHTML = runs.map((r) => `
+    <div class="item">
+      <div class="item-meta">
+        <strong>#${r.id}</strong> · ${esc(r.started_at)} · 来源 ${r.sources_checked ?? 0}
+        · 抓到 ${r.jobs_found ?? 0}（新 ${r.jobs_new ?? 0}，急招 ${r.urgent_count ?? 0}）
+        · ${esc(r.status)}${r.elapsed_ms ? ` · ${Math.round(r.elapsed_ms / 100) / 10}s` : ''}
+        ${r.trigger === 'chat' ? ' · 对话触发' : ''}
+      </div>
+    </div>`).join('');
+}
+
+document.getElementById('discover-add-btn')?.addEventListener('click', async () => {
+  const name = document.getElementById('discover-add-name').value.trim();
+  const url = document.getElementById('discover-add-url').value.trim();
+  if (!name || !url) { setStatus('discover-status', '公司名和地址都要填', 'bad'); return; }
+  try {
+    await api('/api/discover/sources', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, url }),
+    });
+    document.getElementById('discover-add-name').value = '';
+    document.getElementById('discover-add-url').value = '';
+    setStatus('discover-status', '已添加');
+    loadDiscover();
+  } catch (e) {
+    setStatus('discover-status', e.message || '添加失败', 'bad');
+  }
+});
+
+document.getElementById('discover-run-btn')?.addEventListener('click', async () => {
+  if (discoverState.running) return;
+  const btn = document.getElementById('discover-run-btn');
+  const prog = document.getElementById('discover-progress');
+  const status = document.getElementById('discover-status');
+  discoverState.running = true;
+  btn.disabled = true;
+  prog.hidden = false;
+  const steps = [];
+  const paint = (running, last) => {
+    prog.innerHTML = steps.map((s) => `<div class="item-meta">· ${esc(s)}</div>`).join('')
+      + (running ? `<div class="item-meta missed">… ${esc(last || '')}</div>` : '');
+  };
+  paint(true, '连接后端…');
+  try {
+    const resp = await fetch('/api/discover/run', { method: 'POST' });
+    if (!resp.ok || !resp.body) {
+      const detail = await resp.json().catch(() => ({}));
+      throw new Error(detail.detail || `服务异常（${resp.status}）`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let doneFlag = false;
+    while (!doneFlag) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 2);
+        if (!frame.startsWith('data:')) continue;
+        const evt = JSON.parse(frame.slice(5).trim());
+        if (evt.type === 'step') {
+          steps.push(evt.label);
+          paint(true, '');
+        } else if (evt.type === 'done') {
+          doneFlag = true;
+          discoverState.lastSummary = evt.summary;
+          paint(false, '');
+          renderDiscoverResults(evt.summary);
+          setStatus('discover-status',
+            `新增 ${evt.summary.jobs_new} / 抓到 ${evt.summary.jobs_found} · 失败来源 ${(evt.summary.failures || []).length}`,
+            evt.summary.jobs_new ? 'ok' : '');
+          loadDiscover();
+        } else if (evt.type === 'error') {
+          throw new Error(evt.message || '发现轮失败');
+        }
+      }
+    }
+  } catch (e) {
+    prog.innerHTML = `<div class="empty" style="color:var(--danger)">${esc(e.message || '失败')}</div>`;
+    setStatus('discover-status', e.message || '失败', 'bad');
+  } finally {
+    discoverState.running = false;
+    btn.disabled = false;
+    // 完成后的执行 trace 保留在页面上（使用模拟的反馈：3 秒自动收起让人错过过程）。
+    // 下一次点击「现在搜一轮」时 paint() 会自然重置内容
+  }
+});
+
 /* ---------- 导出文件自检（ATS） ----------
    这份检查回答的是"招聘系统能不能读出来"，不是"写得好不好"。
    所以每一项都必须给出具体成因（邮箱读不到 / 日期用了长横线），
@@ -2484,6 +2776,18 @@ checkHealth();
 const initialView = (location.hash || '').replace('#', '');
 if (initialView) activateView(initialView);
 if (initialView === 'radar') enterRadar();
+
+// hash 变化也要跟：用户点浏览器后退/前进、或手动改地址栏时，视图跟着走。
+// 没有这一行，#radar 深链接在已加载页面上不生效（使用模拟发现的盲区）
+window.addEventListener('hashchange', () => {
+  const v = (location.hash || '').replace('#', '');
+  if (v && VIEWS.includes(v)) {
+    activateView(v);
+    if (v === 'radar') enterRadar();
+    if (v === 'workbench') { fillWorkbenchSelects(); loadWorkbenchStats(); }
+    if (v === 'review') loadGapPriority();
+  }
+});
 
 loadResumes().then(fillWorkbenchSelects).catch(() => {});
 loadJobs()

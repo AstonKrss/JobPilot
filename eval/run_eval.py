@@ -10,6 +10,7 @@
 用法：
     .venv/Scripts/python.exe eval/run_eval.py
     .venv/Scripts/python.exe eval/run_eval.py --sweep   # 扫描必备技能阈值
+    .venv/Scripts/python.exe eval/run_eval.py --cases eval/cases_hard.jsonl   # 指定用例文件
 """
 
 from __future__ import annotations
@@ -28,9 +29,10 @@ from app.match.engine import match_one  # noqa: E402
 CASES_PATH = ROOT / "eval" / "cases.jsonl"
 
 
-def load_cases() -> list[dict]:
+def load_cases(path: Path | None = None) -> list[dict]:
+    cases_path = path or CASES_PATH
     cases = []
-    with CASES_PATH.open(encoding="utf-8") as fh:
+    with cases_path.open(encoding="utf-8") as fh:
         for line_no, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
@@ -38,7 +40,7 @@ def load_cases() -> list[dict]:
             try:
                 cases.append(json.loads(line))
             except json.JSONDecodeError as exc:
-                raise SystemExit(f"cases.jsonl 第 {line_no} 行不是合法 JSON：{exc}") from exc
+                raise SystemExit(f"{cases_path.name} 第 {line_no} 行不是合法 JSON：{exc}") from exc
     return cases
 
 
@@ -168,9 +170,10 @@ def sweep(cases: list[dict]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="匹配规则评测")
     parser.add_argument("--sweep", action="store_true", help="扫描必备技能否决阈值")
+    parser.add_argument("--cases", default=None, help="用例文件路径；缺省 eval/cases.jsonl")
     args = parser.parse_args()
 
-    cases = load_cases()
+    cases = load_cases(Path(args.cases) if args.cases else None)
     if args.sweep:
         sweep(cases)
         print()

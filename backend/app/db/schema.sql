@@ -102,9 +102,10 @@ CREATE INDEX IF NOT EXISTS idx_confirm_pending ON entity_confirm_queue (status, 
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS job (
     id            BIGSERIAL PRIMARY KEY,
-    -- 三个平台 + 手动粘贴。之前漏了 zhaopin，导致智联岗位入库时约束报错，
-    -- 而扩展把错误吞掉后仍显示"已入库"——用户看到的来源就变成了错的
-    source        TEXT NOT NULL CHECK (source IN ('boss', 'liepin', 'zhaopin', 'manual')),
+    -- 四个平台 + 手动粘贴 + 官网发现（DiscoverAgent）。之前漏了 zhaopin，导致智联岗位入库时
+    -- 约束报错，而扩展把错误吞掉后仍显示"已入库"——用户看到的来源就变成了错的。
+    -- 加新取值必须同时改下方「约束修补」段，两处缺一不可
+    source        TEXT NOT NULL CHECK (source IN ('boss', 'liepin', 'zhaopin', 'manual', 'careers')),
     source_job_id TEXT,
     url           TEXT,
     -- 插件只搬原文，抽取在后端做。这样平台改 DOM 时爆的是"能不能找到容器"，不是字段全错
@@ -259,7 +260,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_msg ON conversation_message (conversation_id
 -- ---------------------------------------------------------------------------
 ALTER TABLE job DROP CONSTRAINT IF EXISTS job_source_check;
 ALTER TABLE job ADD CONSTRAINT job_source_check
-    CHECK (source IN ('boss', 'liepin', 'zhaopin', 'manual'));
+    CHECK (source IN ('boss', 'liepin', 'zhaopin', 'manual', 'careers'));
 
 -- ---------------------------------------------------------------------------
 -- 向量缓存
@@ -580,3 +581,76 @@ ALTER TABLE company ADD COLUMN IF NOT EXISTS aliases JSONB NOT NULL DEFAULT '[]'
 -- 而排查"为什么抽取结果不对劲"时也无从下手。
 -- ---------------------------------------------------------------------------
 ALTER TABLE job ADD COLUMN IF NOT EXISTS integrity JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- ---------------------------------------------------------------------------
+-- 主动岗位发现（DiscoverAgent）
+--
+-- 雷达只能给已入库的岗位打分；"发现"原来完全靠用户自己刷网站。这两张表
+-- 是"agent 主动去官网招聘页找岗位"的状态层：
+--   discover_source  要抓哪些官网（URL + 适配器类型 + 启停）
+--   discover_run     每一轮发现的执行记录（找到多少、新的多少、哪些源失败）
+-- 抓到的岗位仍走统一入库管线（ingest/jd_pipeline.py，source='careers'），
+-- 去重复用 job 表的既有唯一键——is_new 语义本就是为自动发现设计的。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS discover_source (
+    id          BIGSERIAL PRIMARY KEY,
+    company_key TEXT,                    -- 关联 company.norm_key；抓来岗位的公司归一用
+    name        TEXT NOT NULL,           -- 展示名（公司或招聘站名）
+    url         TEXT NOT NULL,           -- 官网招聘列表页 URL
+    adapter     TEXT NOT NULL DEFAULT 'auto',  -- auto | moka | html（auto = 首抓时按指纹探测）
+    enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+    last_run_at TIMESTAMPTZ,
+    last_status TEXT,                    -- ok | failed | unsupported（附原因于 last_error）
+    last_error  TEXT,
+    last_found  INT,
+    note        TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS discover_run (
+    id             BIGSERIAL PRIMARY KEY,
+    started_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at    TIMESTAMPTZ,
+    status         TEXT NOT NULL DEFAULT 'running',  -- running | done | failed
+    trigger        TEXT,                   -- manual | chat（哪条入口触发的）
+    sources_checked INT NOT NULL DEFAULT 0,
+    jobs_found     INT NOT NULL DEFAULT 0,
+    jobs_new       INT NOT NULL DEFAULT 0,
+    urgent_count   INT NOT NULL DEFAULT 0,
+    summary        JSONB,                  -- 汇总（含每源失败原因、样本条目）
+    elapsed_ms     INT,
+    error          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_discover_run_time ON discover_run (started_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- 技术栈补漏：把 JD 的必备技能名词展开为"可自查的具体能力"
+--
+-- 痛点来自真实使用：blocked 卡片说「缺 FastAPI」只是名词，用户真正要回答的
+-- 是"企业说的『会』到底意味着能做什么"。展开结果与具体岗位无关（同一个技能
+-- 的常见考察点不会因为换公司而变），所以按「技能归一键 + 校招/社招语境」
+-- 缓存，跨岗位复用 —— 与 skill_judge_cache 同一套设计。
+-- 自评表按 (resume_id, 条目哈希) 唯一：条目文本不变，自评跨岗位跟随。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS skill_expansion_cache (
+    id          BIGSERIAL PRIMARY KEY,
+    cache_key   TEXT NOT NULL UNIQUE,       -- sha256(skill_norm + 0x00 + 语境)
+    skill       TEXT NOT NULL,              -- 原文写法（展示用）
+    skill_norm  TEXT NOT NULL,              -- norm_key 归一键（聚合时对齐 job_profile）
+    context     TEXT NOT NULL,              -- 校招 | 社招
+    items       JSONB NOT NULL,             -- [{text, tag: 基础|进阶|深入}]
+    model       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS skill_self_assess (
+    id          BIGSERIAL PRIMARY KEY,
+    resume_id   BIGINT NOT NULL REFERENCES resume(id) ON DELETE CASCADE,
+    item_hash   TEXT NOT NULL,              -- sha256(条目文本)
+    item        TEXT NOT NULL,              -- 条目原文（展示用，缓存被清也能显示）
+    skill_norm  TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('can_explain', 'used_shallow', 'never')),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (resume_id, item_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_self_assess_resume ON skill_self_assess (resume_id);

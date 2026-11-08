@@ -139,6 +139,31 @@
         <div id="radar-plan-body"><div class="empty">加载中…</div></div>
       </div>
 
+      <div class="panel" id="discover-panel">
+        <div class="panel-head">
+          <h2>主动搜索（官网直达）</h2>
+          <span class="count" id="discover-status"></span>
+          <button class="btn" id="discover-run-btn" style="margin-left:auto">现在搜一轮</button>
+        </div>
+        <p class="hint">Agent 主动去下面这些公司官网招聘页找新岗位：限速抓取、每轮有预算上限；「能不能投」的判定与雷达同口径。扩展的一键发现是去招聘平台搜，这里是去公司官网——两个互补的入口。</p>
+        <div id="discover-progress" hidden><div class="empty">扫描中…</div></div>
+        <div id="discover-results"><div class="empty">还没有扫过。加几个招聘页地址，点「现在搜一轮」。</div></div>
+        <details id="discover-manage">
+          <summary>管理官网来源（<span id="discover-src-count">0</span> 个）</summary>
+          <div id="discover-sources"><div class="empty">加载中…</div></div>
+          <div class="add-row" style="display:flex;gap:8px;margin-top:10px">
+            <input id="discover-add-name" placeholder="公司或站点名（如 OPPO 校招）" style="flex:1">
+            <input id="discover-add-url" placeholder="招聘列表页完整地址 https://…" style="flex:2">
+            <button class="btn" id="discover-add-btn">添加</button>
+          </div>
+          <p class="hint">地址怎么找：官网底部「加入我们/招聘」链接，或搜「{公司名} 校园招聘 官网」。用 Moka 等招聘系统的官网抓取最稳；JS 渲染的页面会如实报告"抓不了"。</p>
+        </details>
+        <details id="discover-history">
+          <summary>历史轮次</summary>
+          <div id="discover-runs"><div class="empty">加载中…</div></div>
+        </details>
+      </div>
+
       <div class="panel">
         <div class="panel-head">
           <h2>候选池</h2>
@@ -327,6 +352,12 @@
         <p class="status" id="review-status"></p>
       </div>
       <div id="review-result"></div>
+
+      <details class="panel" id="gap-priority-panel">
+        <summary class="sec-title">学习优先级（跨岗位技能自查聚合）</summary>
+        <p class="hint">被多个在架岗位同时要求、而自评还没过的具体能力，按岗位数排序 —— 回答「我先学什么」。自评在工作台「展开为具体能力」里做，条目是常见考察点推断，不是企业真实标准。</p>
+        <div id="gap-priority-box"><div class="empty">加载中…</div></div>
+      </details>
     </section>
 
   </main>
