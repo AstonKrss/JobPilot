@@ -676,6 +676,39 @@ SpringBoot
 
 ---
 
+## MCP server：把能力暴露给外部 agent
+
+第三条出口（前两条：网页界面、对话）。MCP（Model Context Protocol）是 agent 客户端调用外部工具的标准协议——注册之后，Claude Desktop / Claude Code 可以像用它的内置工具一样**直接查你的岗位库**。
+
+```mermaid
+flowchart LR
+    subgraph tool["8 个工具（stdio）"]
+        t1["radar_overview / job_verdict<br/>list_jobs / resume_matches<br/>profile_summary<br/>skill_gap_expand / skill_gap_priority<br/>discover_run"]
+    end
+    ui["网页界面"] -.->|同一套业务函数| tool
+    chat["对话链路"] -.->|同一套业务函数| tool
+    cl["Claude 等 MCP 客户端"] -->|stdio| tool
+```
+
+**注册（stdio，客户端以子进程拉起，本地单机无端口无鉴权）**：
+
+```bash
+# Claude Code
+claude mcp add jobpilot -- python <项目绝对路径>/scripts/mcp_server.py
+```
+
+Claude Desktop 在配置文件 `mcpServers` 里加同款 `command/args`。注册后即可自然语言问「我库里现在有什么能投的岗位」「佛山后端实习我差哪些能力」「帮我跑一轮主动发现」。
+
+三条刻意边界：
+
+1. **只读 + 一个受控写口**。不暴露 chat（chat 本身是 agent，嵌套 agent 不可控且慢）；不暴露画像/简历写入（外部 agent 改你的长期偏好是危险的）。唯一的写是 `discover_run`——幂等去重，风险可控。
+2. **协议正确性交给官方 SDK**。`mcp` 包（PyPI，需官方源：`pip install --index-url https://pypi.org/simple mcp`——清华镜像未同步）。预期内的失败必须抛 SDK 的 `ToolError`：其他异常一律被客户端吞成「Error executing tool」，模型看不到原因（check_mcp 抓到的）。
+3. **与网页服务相互独立、可同时运行**。各自持连接池；业务函数直接 import 复用（不开 HTTP 中转）——check 脚本就是这个模式。
+
+协议回归：`python scripts/check_mcp.py`（子进程拉起 server 说 JSON-RPC：握手 → tools/list 8 工具 → 真实调用三个代表工具 → 404 语义保留）。
+
+---
+
 ## 投递之后：该催谁，以及分数到底准不准
 
 雷达管「投之前」，这一节管「投之后」。两件事，各回答一个此前没有答案的问题。
@@ -941,6 +974,7 @@ backend/
                   agent 确定性管线 / seed_sources 内置来源）
     gap/          技术栈补漏（expand 技能展开+跨岗缓存 / assess 自评与
                   学习优先级聚合）
+    mcp_server.py MCP server：8 个工具经 stdio 暴露给外部 agent（Claude 等）
     memory/       记忆（extract 三层漏斗 / profile_repo 画像 / episode 情节召回）
     rewrite/      改写（docx_editor / pdf_convert / skills / factcheck /
                   ats_check 导出自检与页数裁剪建议）
@@ -974,6 +1008,7 @@ python scripts/check_factcheck.py    # 改写的事实核查
 python scripts/check_episode_recall.py   # 情节召回打分（离线：不需要库、向量模型与网络）
 python scripts/check_discover.py         # 主动发现：Moka 契约 / 锚点预筛 / 急招启发式 / 编排（离线 + 可选真库）
 python scripts/check_gap.py              # 技术栈补漏：展开缓存 / 自评幂等 / 聚合排序（离线 + 可选真库）
+python scripts/check_mcp.py              # MCP 协议回归：握手 / 8 工具 / 真实调用 / 404 语义（协议段离线可跑）
 
 # 会话级端到端评测（需要数据库 + LLM key；通过 TestClient 进程内跑，不用起服务）
 python eval/run_scenarios.py             # 8 条多轮场景：记忆写入 / 路由出口 / 回复约束
