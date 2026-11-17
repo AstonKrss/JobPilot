@@ -37,3 +37,6 @@ backend/static/_preview*.html
 # 评测产物（时间戳报告：含完整对话回复与岗位数据，属于本机使用痕迹；
 # 关键数字已沉淀在 docs/*report*.md，需要时可重跑 eval/ 再生成）
 eval/results/
+
+# 个人面试准备材料（含话术与自评，绝不进公开仓库）
+_private/

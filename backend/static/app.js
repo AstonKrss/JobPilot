@@ -1910,7 +1910,6 @@ function renderChatJobs(jobs, directionHits) {
       </div>
       <div class="item-meta">
         ${esc([j.company, j.city].filter(Boolean).join(' · '))}
-        ${j.semantic_sim != null ? ` · 语义相关 ${j.semantic_sim}` : ''}
       </div>
       ${isBlocked && (j.blockers || []).length
         ? `<div class="item-meta missed">卡在：${esc(j.blockers.join('；'))}</div>` : ''}

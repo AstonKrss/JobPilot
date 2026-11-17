@@ -60,6 +60,9 @@ PLAN_SYSTEM_PROMPT = """你是求职助手的规划器。根据用户消息和�
   → action 填 "discover"，clarify 与 chat 都填 null。**这条优先于"缺方向就 clarify"**：
   主动搜索不依赖方向 —— 没有方向也直接执行，抓回来的岗位按画像与城市筛；
   召回背景里有旧方向同样不妨碍执行。
+- 走 chat 出口时，如果用户消息里出现了**明确的岗位方向**（如「存储方向怎么样」「AI Agent 岗有前景吗」），
+  **必须同时把 intent 填上**——这是在积累上下文：下一轮用户说「有什么合适的岗位」时才能直接按
+  这个方向搜，不用重说一遍。只回话不填 intent，等于把用户刚说的方向弄丢了（实战抓到过）。
 - **只要 intent 有了就足够执行检索**，城市留空表示"不按城市限制"，clarify 填 null。
   不要因为用户没说城市就反问 —— 用户问的是方向，先把方向上的岗位捞给他看，
   城市的事可以在结果里说明（"这几个在佛山，你设的是深圳"）。
@@ -524,7 +527,11 @@ async def handle_message(
         jobs_payload: list[dict] = []
         trace_payload["route"] = "chat"
     # ---- 缺关键信息：先问再做，不猜 ----
-    elif clarify:
+    # 但 clarify 只在「没有任何可用的持久方向」时合法：槽位里已有 intent 时，
+    # 「有什么合适的岗位」这类消息应该直接按已有方向搜——模型输出的 clarify
+    # 不能覆盖持久状态（实战抓到：槽位里明明有 intent，回复却反问方向，
+    # 用户被迫重说一遍）。真正的新方向冲突会走 intent 更新，不走到这里。
+    elif clarify and not slots.get("intent"):
         reply = clarify
         jobs_payload = []
         trace_payload["route"] = "clarify"
