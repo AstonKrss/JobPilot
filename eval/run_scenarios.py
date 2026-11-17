@@ -33,6 +33,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from psycopg.types.json import Jsonb  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
@@ -56,7 +58,7 @@ EXPECT_KEYS = {
     "jobs_empty_last",       # bool 最后一轮不带岗位卡片
     "steps_last_contains",   # [str] 最后一轮的执行进度里包含（意图/城市等中间事实）
 }
-SETUP_KEYS = {"profile"}
+SETUP_KEYS = {"profile", "episodes"}
 
 
 def load_scenarios(path: Path | None = None) -> list[dict]:
@@ -110,12 +112,20 @@ def snapshot(conn) -> dict:
         "profile": profile,
         "hist_max": conn.execute("SELECT coalesce(max(id), 0) FROM user_profile_history").fetchone()[0],
         "conv_max": conn.execute("SELECT coalesce(max(id), 0) FROM conversation").fetchone()[0],
-        "episodes": conn.execute("SELECT id, hit_count, last_hit_at FROM episode").fetchall(),
+        # 情节记忆整表快照：setup 可能预埋/删除 episode，还原必须精确到整行
+        "episodes_full": conn.execute(
+            "SELECT id, conversation_id, topic, summary, facts, embedding,"
+            " created_at, last_hit_at, hit_count FROM episode"
+        ).fetchall(),
     }
 
 
 def apply_setup(conn, setup: dict) -> None:
-    """清空画像后写入场景基线。空 dict 也是合法基线（验证「什么都没配」的行为）。"""
+    """清空画像后写入场景基线。空 dict 也是合法基线（验证「什么都没配」的行为）。
+
+    episodes 预埋用本地向量（ONNX，无 LLM 成本）；conversation_id 置 NULL，
+    避免引用被还原流程删除的会话。
+    """
     conn.execute("DELETE FROM user_profile")
     for key, value in (setup.get("profile") or {}).items():
         conn.execute(
@@ -123,18 +133,59 @@ def apply_setup(conn, setup: dict) -> None:
             (key, json.dumps(value, ensure_ascii=False)),
         )
     conn.commit()
+    for ep in (setup.get("episodes") or []):
+        from app.memory.episode import _to_bytes
+        from app.match import semantic
+
+        vecs = semantic.embed([f"{ep.get('topic')}｜{ep.get('summary')}"])
+        conn.execute(
+            """
+            INSERT INTO episode (conversation_id, topic, summary, facts, embedding)
+            VALUES (NULL, %s, %s, %s, %s)
+            """,
+            (
+                ep.get("topic"),
+                ep.get("summary"),
+                Jsonb(ep.get("facts") or []),
+                _to_bytes(vecs[0]) if vecs else None,
+            ),
+        )
+    conn.commit()
 
 
 def restore(conn, snap: dict) -> None:
-    """精确还原到快照状态。顺序：会话 → 情节命中计数 → 画像。"""
+    """精确还原到快照状态。顺序：会话 → 情节整表重建 → 画像。"""
     conn.execute("DELETE FROM conversation_message WHERE conversation_id > %s", (snap["conv_max"],))
     conn.execute("DELETE FROM conversation WHERE id > %s", (snap["conv_max"],))
     conn.execute("DELETE FROM user_profile_history WHERE id > %s", (snap["hist_max"],))
-    for eid, hit_count, last_hit_at in snap["episodes"]:
+    # 情节整表重建：先删后插。两个坑（都被 ctx 套件抓过）：
+    #   ① facts 是 JSONB 列，Python list 必须用 Jsonb 适配——裸 list 会被当成
+    #      PG 数组语法，JSONB 解析直接报错；
+    #   ② 引用已删会话的行 conversation_id 回填 NULL（外键），否则插不进去。
+    conn.execute("DELETE FROM episode")
+    for (eid, conv_id, topic, summary, facts, embedding, created_at,
+         last_hit_at, hit_count) in snap["episodes_full"]:
+        conv_ok = None
+        if conv_id is not None:
+            conv_ok = conn.execute(
+                "SELECT 1 FROM conversation WHERE id = %s", (conv_id,)
+            ).fetchone()
         conn.execute(
-            "UPDATE episode SET hit_count = %s, last_hit_at = %s WHERE id = %s",
-            (hit_count, last_hit_at, eid),
+            """
+            INSERT INTO episode (id, conversation_id, topic, summary, facts, embedding,
+                                 created_at, last_hit_at, hit_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                eid,
+                conv_id if conv_ok else None,
+                topic, summary,
+                Jsonb(facts) if facts is not None else None,
+                embedding,
+                created_at, last_hit_at, hit_count,
+            ),
         )
+    conn.execute("SELECT setval('episode_id_seq', (SELECT coalesce(max(id), 1) FROM episode))")
     conn.execute("DELETE FROM user_profile")
     for key, row in snap["profile"].items():
         conn.execute(
@@ -248,6 +299,12 @@ def run_case(client, conn, case: dict) -> dict:
         try:
             restore(conn, snap)
         except Exception as exc:  # noqa: BLE001
+            # 还原失败后事务处于 aborted 状态——必须 rollback，否则
+            # 下一个场景的 snapshot 会 InFailedSqlTransaction 整个套件中断
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
             print(f"  !! 还原失败，请手工检查 user_profile/episode：{exc}")
 
     return {

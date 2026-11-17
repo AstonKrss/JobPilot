@@ -53,9 +53,11 @@ PLAN_SYSTEM_PROMPT = """你是求职助手的规划器。根据用户消息和�
 判定标准：
 - 用户表达了岗位方向（如"想找 agent 相关的"）或目标城市，就更新对应字段。
 - intent 只有一个字段，装不下就概括成"XX 方向"。
-- **intent 只能来自用户本轮消息或已有的会话槽位**。【过往结论】这类召回背景
-  只是历史参考，不能直接当成本轮意图 —— 用户这轮没说方向、历史槽位里也没有时，
-  就算召回里有旧方向，也走 clarify 问一句（问句里可以带上旧方向作为选项）。
+- intent 来源（按优先级）：① 用户本轮消息里明确说的方向；② 会话槽位里已有的 intent；
+  ③ **最近几轮对话里明确讨论过的方向**——包括你自己上一轮回复里确认过的方向
+  （你刚答过「存储方向挺稳的」，用户接着问「有什么合适的岗位」，就该按存储搜）。
+  仍然排除：【过往结论】这类召回背景是**跨会话的旧记忆**，用户本轮和最近几轮
+  都没提到它时，不能直接当意图——宁可 clarify 问一句（问句里可以带旧方向作为选项）。
 - 用户让你**主动出去找新岗位**（"帮我主动找""自动去各公司官网看看有没有新岗位"）
   → action 填 "discover"，clarify 与 chat 都填 null。**这条优先于"缺方向就 clarify"**：
   主动搜索不依赖方向 —— 没有方向也直接执行，抓回来的岗位按画像与城市筛；
@@ -409,19 +411,29 @@ async def handle_message(
     # 检索回答"库里有什么"，discover 回答"外面新出现了什么"
     action = (plan_data.get("action") or "").strip().lower()
 
-    # 意图来源合法性由代码判定，不信任模型自报（R7：prompt 规则在长上下文里
-    # 会漂移——「召回背景不能当意图」写了三遍，实测仍间歇性越权）。
-    # 判据：本轮槽位原本没有 intent、且模型给的意图词在用户消息里找不到任何
-    # 字面片段 → 这个意图只能来自召回背景/模型脑补 → 丢弃并强制 clarify。
-    # 误伤面：「看看有没有适合我的」这类无方向消息本来就该 clarify，行为一致。
-    if intent and not slots.get("intent"):
+    # 意图来源合法性由代码判定：意图片段必须能在「本轮消息 + 最近对话」里找到。
+    # 最近对话（recent_window）是本会话的上下文——用户说过、或助手回复里确认过的
+    # 方向都是合法来源（实战抓到：用户问「存储方向怎么样」、助手答了，下一轮
+    # 「有什么合适的岗位」被 clarify 挡住——方向明明就在历史里）。
+    # 召回背景（跨会话旧记忆）不在 recent_window 里——从那里脑补的意图仍被拦截
+    # （R7 修复不回退）。
+    hist_text = " ".join((m.get("content") or "") for m in (history or []))
+    intent_source = None
+    if intent:
         pieces = _fragments(intent)
-        if pieces and not any(p in user_text for p in pieces):
-            logger.info("意图来源拦截：模型意图「%s」的字面片段不在用户消息里，判为召回污染", intent)
-            intent = None
-            slots.pop("intent", None)
-            if not clarify:
-                clarify = "想找什么方向的岗位？给我一个关键词就行（后端 / 产品 / 数据分析），我按这个方向去筛。"
+        if any(p in user_text for p in pieces):
+            intent_source = "user_message"
+        elif hist_text and any(p in hist_text for p in pieces):
+            intent_source = "history"
+        else:
+            intent_source = "unknown"
+    if intent and not slots.get("intent") and intent_source == "unknown":
+        logger.info("意图来源拦截：意图「%s」的片段不在本轮消息与最近对话里，判为召回污染", intent)
+        intent = None
+        slots.pop("intent", None)
+        intent_source = "blocked"
+        if not clarify:
+            clarify = "想找什么方向的岗位？给我一个关键词就行（后端 / 产品 / 数据分析），我按这个方向去筛。"
 
     if intent:
         slots["intent"] = intent
@@ -462,6 +474,7 @@ async def handle_message(
     trace_payload: dict = {
         "route": "unknown",
         "degraded": ["plan_fallback"] if plan_failed else [],
+        "intent_source": intent_source,
     }
     updates = extract.clean_updates(plan_data.get("profile_updates") or [])
     if updates and _is_search_command(user_text):
