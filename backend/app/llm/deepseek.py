@@ -63,18 +63,20 @@ class LLMResult:
         )
 
 
-def ensure_llm_ready() -> None:
+def ensure_llm_ready(api_key: str | None = None) -> None:
     """调用前显式检查密钥，给出可执行的指引而不是让用户面对 401。"""
-    if not settings.llm_api_key:
+    key = api_key if api_key is not None else settings.llm_api_key
+    if not key:
         raise PermanentError(
             "未配置 LLM_API_KEY，无法调用模型。请在项目根目录的 .env 中填入密钥",
             detail="settings.llm_api_key is empty",
         )
 
 
-def _build_headers(session_id: str) -> dict[str, str]:
+def _build_headers(session_id: str, api_key: str | None = None) -> dict[str, str]:
+    key = api_key if api_key is not None else settings.llm_api_key
     return {
-        "Authorization": f"Bearer {settings.llm_api_key}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         # 网关要求识别客户端身份；用通用 SDK 名可能被限流
         "User-Agent": settings.llm_user_agent,
@@ -83,11 +85,18 @@ def _build_headers(session_id: str) -> dict[str, str]:
     }
 
 
-async def _post_chat(payload: dict, session_id: str) -> dict:
-    url = f"{settings.llm_base_url.rstrip('/')}/chat/completions"
+async def _post_chat(
+    payload: dict,
+    session_id: str,
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> dict:
+    root = (base_url or settings.llm_base_url).rstrip("/")
+    url = f"{root}/chat/completions"
     # 每次建 client：调用频率低（单份简历数次），不值得为此管理长连接生命周期
     async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
-        resp = await client.post(url, json=payload, headers=_build_headers(session_id))
+        resp = await client.post(url, json=payload, headers=_build_headers(session_id, api_key))
         if resp.status_code != 200:
             raise classify_http_status(resp.status_code, resp.text)
         return resp.json()
@@ -101,6 +110,9 @@ async def chat_json(
     max_tokens: int = 8000,
     session_id: str | None = None,
     cache_tag: str | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> LLMResult:
     """要求模型返回 JSON 对象。
 
@@ -112,20 +124,26 @@ async def chat_json(
     JD 抽取、简历抽取、放宽建议这类「同样输入就该同样输出」的场景。
     建议生成、简历改写、对话都不能开 —— 用户点「重新生成」时期待的是新结果，
     命中缓存会让它看起来像按了没反应。
+
+    model/base_url/api_key 可选覆盖：供 eval/judge.py 接入异家族独立裁判模型，
+    不传则沿用主配置。
     """
-    ensure_llm_ready()
+    eff_key = api_key or settings.llm_api_key
+    eff_base = base_url or settings.llm_base_url
+    eff_model = model or settings.llm_model
+    ensure_llm_ready(eff_key)
     sid = session_id or f"jobagent-{uuid.uuid4().hex[:12]}"
 
     cache_key = None
     if cache_tag:
-        cache_key = _cache_key(settings.llm_model, system, user, max_tokens)
+        cache_key = _cache_key(eff_model, system, user, max_tokens)
         hit = _cache_load(cache_tag, cache_key)
         if hit is not None:
             logger.info("[%s] 命中快照，跳过调用（%s）", what, cache_key[:12])
             return hit
 
     payload: dict = {
-        "model": settings.llm_model,
+        "model": eff_model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -140,7 +158,9 @@ async def chat_json(
         payload["temperature"] = 0
 
     started = time.monotonic()
-    data = await call_with_retry(lambda: _post_chat(payload, sid), what=what)
+    data = await call_with_retry(
+        lambda: _post_chat(payload, sid, base_url=eff_base, api_key=eff_key), what=what
+    )
     elapsed_ms = int((time.monotonic() - started) * 1000)
 
     try:

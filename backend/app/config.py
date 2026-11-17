@@ -64,6 +64,17 @@ class Settings(BaseSettings):
     discover_max_listings: int = 40        # 每轮入库条目上限
     discover_max_pages_per_source: int = 3
 
+    # ---- Eval Harness：独立裁判模型（为空时回退到上面的主模型，存在同源自评偏差）----
+    judge_api_key: str = ""
+    judge_base_url: str = ""
+    judge_model: str = ""
+
+    # ---- 异步任务层（P1.3）：Postgres 队列 + 后台 worker ----
+    tasks_enabled: bool = True            # False 时 lifespan 不启动 worker（纯 API 模式）
+    tasks_poll_interval_s: float = 1.0    # worker 空闲轮询间隔
+    tasks_stale_after_s: float = 900.0    # running 超过 15 分钟视为上个进程的遗留，重排 pending
+    tasks_scheduled_discover_h: float = 0.0  # 定时主动发现间隔（小时），0 = 关闭
+
 
 settings = Settings()
 settings.upload_dir.mkdir(parents=True, exist_ok=True)

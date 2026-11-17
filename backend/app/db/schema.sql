@@ -654,3 +654,32 @@ CREATE TABLE IF NOT EXISTS skill_self_assess (
     UNIQUE (resume_id, item_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_self_assess_resume ON skill_self_assess (resume_id);
+
+-- ---------------------------------------------------------------------------
+-- 异步任务层（P1.3）：Postgres 队列 + 后台 worker
+--
+-- 三个真实慢任务的后台化：简历 OCR 解析（1-2 分钟）、批量匹配重建、
+-- 定时主动发现。刻意不引入 Kafka/RabbitMQ：单机单用户下没有吞吐对象，
+-- FOR UPDATE SKIP LOCKED 的行级锁足以支撑多 worker 横向扩容。
+-- 取消是协作式的：worker 在写进度时检查 cancelled，pending 直接改状态。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS task_queue (
+    id           BIGSERIAL PRIMARY KEY,
+    type         TEXT NOT NULL,              -- parse_resume / discover_run / match_rebuild
+    payload      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending', 'running', 'done', 'failed', 'cancelled')),
+    progress     TEXT,                       -- 最新一步的人话进度
+    result       JSONB,                      -- 成功时的汇总
+    error        TEXT,                       -- 失败原因（人话）
+    attempts     INT NOT NULL DEFAULT 0,
+    max_attempts INT NOT NULL DEFAULT 2,
+    worker_id    TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at   TIMESTAMPTZ,
+    finished_at  TIMESTAMPTZ
+);
+-- 领取路径只扫 pending：部分索引让 claim 在大队列下依然 O(少量行)
+CREATE INDEX IF NOT EXISTS idx_task_queue_claim
+    ON task_queue (status, created_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_task_queue_time ON task_queue (created_at DESC);

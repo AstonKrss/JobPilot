@@ -8,21 +8,22 @@
     所以交给模型按固定 rubric 打分。
 
 方法学限制（写在最前面，防止误读数字）
-    judge 与被评系统目前共用同一个模型（网关只有这一个），同源自评
-    有系统性偏差 —— 自己的错误自己看不见。所以这里的数字用于**回归
-    对比**（改 prompt / 改链路前后各跑一遍，看维度通过率的变化），
-    不作为绝对质量声明。网关以后有更强的模型时，换 judge 只需在
-    .env 里加 JUDGE_MODEL 并同步 deepseek.py 的模型参数。
+    如果 .env 没配 JUDGE_MODEL，judge 会回退到与被评系统相同的模型 ——
+    同源自评有系统性偏差。配了 JUDGE_API_KEY / JUDGE_BASE_URL / JUDGE_MODEL
+    之后自动切到异家族独立裁判。
 
 用法：
     .venv/Scripts/python.exe eval/judge.py                          # 评最新一份 scenarios 报告
     .venv/Scripts/python.exe eval/judge.py eval/results/scenarios_xxx.json
+    .venv/Scripts/python.exe eval/judge.py --concurrency 3          # 并发限流评判（默认 3）
+    .venv/Scripts/python.exe eval/judge.py --resume eval/results/judged_xxx.json   # 断点续评
     .venv/Scripts/python.exe eval/judge.py --compare eval/results/judged_旧.json  # 与上次对比
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from datetime import datetime
@@ -31,6 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
+from app.config import settings  # noqa: E402
 from app.llm.deepseek import chat_json, parse_json_object  # noqa: E402
 
 RESULTS_DIR = ROOT / "eval" / "results"
@@ -63,7 +65,10 @@ JUDGE_SYSTEM_PROMPT = """你是「求职助手」回复质量的评审。给定�
    当检索结果里存在"方向对但投不进"的岗位（result 里 decision 为 reject 的条目），
    回复是否说清了卡在哪（城市不符 / 缺哪些技能）。没有这类岗位时 clarity_applicable 填 false。
 
-严格：只依据给出的材料判断，不要脑补助手"可能"拿到了什么。reason 一句话，最长 40 字。"""
+反偏见纪律（必须遵守）：
+- **严禁长度偏见**：不要因为回复字数多、排版长就给高分；简短精准、不废话的一句话答复同样满分。
+- **忽略材料顺序**：检索结果里的条目顺序不代表重要性权重。
+- **只依据给出的材料判断**，不要脑补助手"可能"拿到了什么。reason 一句话，最长 40 字。"""
 
 
 def latest_scenarios_report() -> Path:
@@ -108,7 +113,16 @@ async def judge_turn(item: dict) -> dict:
         f"用户消息：{item['user']}\n\n助手回复：\n{item['reply']}\n\n"
         f"{_jobs_block(item['jobs'])}"
     )
-    result = await chat_json(JUDGE_SYSTEM_PROMPT, user_msg, what="回复评审", max_tokens=300)
+    # 独立裁判配置：配了 JUDGE_* 就走异家族模型，否则回退主模型（记录在报告元数据里，防止误判为独立裁判）
+    result = await chat_json(
+        JUDGE_SYSTEM_PROMPT,
+        user_msg,
+        what="回复评审",
+        max_tokens=300,
+        model=settings.judge_model or None,
+        base_url=settings.judge_base_url or None,
+        api_key=settings.judge_api_key or None,
+    )
     payload = parse_json_object(result.text, what="回复评审")
 
     def bit(key: str) -> int:
@@ -122,6 +136,7 @@ async def judge_turn(item: dict) -> dict:
         "clarity": bit("clarity"),
         "clarity_applicable": payload.get("clarity_applicable") is not False,
         "reason": str(payload.get("reason") or "")[:80],
+        "judge_model": result.model,
         "judge_ok": True,
     }
 
@@ -168,6 +183,13 @@ def _fmt(value) -> str:
     return "—" if value is None else f"{value:.3f}"
 
 
+def _shown_path(p: Path) -> str:
+    try:
+        return str(p.relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
 def compare(cur: dict, prev: dict) -> None:
     print("\n== 与上次对比 ==")
     for key, label in (
@@ -183,33 +205,97 @@ def compare(cur: dict, prev: dict) -> None:
         print(f"  {label}: {old:.3f} → {new:.3f} {arrow} {delta:+.3f}")
 
 
+def _turn_key(item: dict) -> tuple[str, int]:
+    return (str(item.get("scenario_id") or ""), int(item.get("turn_index") or 0))
+
+
+def _save_report(
+    out: Path,
+    report_path: Path,
+    verdicts: list[dict],
+    summary: dict,
+    judge_meta: dict,
+) -> None:
+    out.write_text(
+        json.dumps({
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "source_report": report_path.name,
+            "judge": judge_meta,
+            "summary": summary,
+            "verdicts": verdicts,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="LLM-as-judge 回复质量评判")
     parser.add_argument("report", nargs="?", help="scenarios 报告路径；缺省用最新一份")
     parser.add_argument("--compare", help="与某份 judged_*.json 对比维度通过率")
+    parser.add_argument("--concurrency", type=int, default=3, help="并发限流（asyncio.Semaphore，默认 3）")
+    parser.add_argument("--resume", help="从一份未完或含错误的 judged_*.json 断点续评")
     args = parser.parse_args()
 
-    report_path = Path(args.report) if args.report else latest_scenarios_report()
+    if args.resume:
+        out = Path(args.resume).resolve()
+        prev_data = json.loads(out.read_text(encoding="utf-8"))
+        report_path = Path(args.report) if args.report else (RESULTS_DIR / prev_data["source_report"])
+        done_map = {
+            _turn_key(v): v
+            for v in (prev_data.get("verdicts") or [])
+            if v.get("judge_ok")
+        }
+    else:
+        report_path = Path(args.report) if args.report else latest_scenarios_report()
+        out = RESULTS_DIR / f"judged_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        done_map = {}
+
     report = json.loads(report_path.read_text(encoding="utf-8"))
     items = turns_from_report(report)
     if not items:
         raise SystemExit(f"{report_path.name} 里没有可评的轮次")
 
-    import asyncio
+    judge_meta = {
+        "model": settings.judge_model or settings.llm_model,
+        "independent_family": bool(settings.judge_model and settings.judge_model != settings.llm_model),
+        "concurrency": max(1, min(args.concurrency, 8)),
+    }
 
-    verdicts: list[dict] = []
-    print(f"评审 {len(items)} 轮回复（来源 {report_path.name}）…")
+    verdicts_by_idx: dict[int, dict] = {}
+    pending_indices: list[int] = []
+    for idx, item in enumerate(items):
+        prev_v = done_map.get(_turn_key(item))
+        if prev_v is not None:
+            verdicts_by_idx[idx] = prev_v
+        else:
+            pending_indices.append(idx)
 
-    async def run_all() -> None:
-        for item in items:
+    print(
+        f"评审 {len(items)} 轮回复（待评 {len(pending_indices)}，已续 {len(items) - len(pending_indices)}，"
+        f"模型 {judge_meta['model']}，并发 {judge_meta['concurrency']}，来源 {report_path.name}）…"
+    )
+
+    sem = asyncio.Semaphore(judge_meta["concurrency"])
+    file_lock = asyncio.Lock()
+
+    async def worker(idx: int) -> None:
+        item = items[idx]
+        async with sem:
             try:
                 v = await judge_turn(item)
             except Exception as exc:  # noqa: BLE001
                 v = {"judge_ok": False, "error": str(exc)[:120]}
                 print(f"  [JUDGE-ERR] {item['scenario_id']} 第 {item['turn_index']} 轮：{v['error']}")
-            v.update({"scenario_id": item["scenario_id"], "turn_index": item["turn_index"],
-                      "user": item["user"], "reply": item["reply"]})
-            verdicts.append(v)
+            v.update({
+                "scenario_id": item["scenario_id"],
+                "turn_index": item["turn_index"],
+                "user": item["user"],
+                "reply": item["reply"],
+            })
+            async with file_lock:
+                verdicts_by_idx[idx] = v
+                ordered = [verdicts_by_idx[i] for i in sorted(verdicts_by_idx)]
+                _save_report(out, report_path, ordered, aggregate(ordered), judge_meta)
             if v.get("judge_ok"):
                 flags = "".join(
                     "!" if v[k] == 0 else "."
@@ -218,19 +304,15 @@ def main() -> int:
                 cla = "na" if not v["clarity_applicable"] else ("." if v["clarity"] == 1 else "!")
                 print(f"  [{flags}{cla}] {item['scenario_id']} #{item['turn_index']}  {v['reason']}")
 
+    async def run_all() -> None:
+        if pending_indices:
+            await asyncio.gather(*(worker(i) for i in pending_indices))
+
     asyncio.run(run_all())
 
+    verdicts = [verdicts_by_idx[i] for i in range(len(items))]
     summary = aggregate(verdicts)
-    out = RESULTS_DIR / f"judged_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    out.write_text(
-        json.dumps({
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "source_report": report_path.name,
-            "summary": summary,
-            "verdicts": verdicts,
-        }, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _save_report(out, report_path, verdicts, summary, judge_meta)
 
     print(f"\n== 维度通过率（{summary['turns_judged']} 轮，judge 失败 {summary['judge_errors']}）==")
     print(f"  编造: {_fmt(summary['fabrication_pass'])} (n={summary['fabrication_n']})")
@@ -238,7 +320,7 @@ def main() -> int:
     print(f"  贴题: {_fmt(summary['relevance_pass'])} (n={summary['relevance_n']})")
     print(f"  缺口: {_fmt(summary['clarity_pass'])} (n={summary['clarity_n']})")
     print(f"  整体: {_fmt(summary['turn_pass'])}")
-    print(f"报告已写入 {out.relative_to(ROOT)}")
+    print(f"报告已写入 {_shown_path(out)}")
 
     if args.compare:
         prev = json.loads(Path(args.compare).read_text(encoding="utf-8")).get("summary") or {}

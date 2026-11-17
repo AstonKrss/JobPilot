@@ -19,6 +19,7 @@ from .api import (
     advice,
     discover,
     gap,
+    tasks as tasks_api,
     workbench,
     memory,
     skills,
@@ -54,7 +55,22 @@ async def lifespan(app: FastAPI):
             "DEEPSEEK_API_KEY 未配置：PDF 解析与库入库可以正常进行，"
             "但字段抽取会在调用模型时返回明确错误。请在 .env 中填入密钥"
         )
+    # 后台 worker（P1.3）：领 task_queue 里的慢任务（简历解析/主动发现/匹配重建）
+    worker_handle = None
+    if settings.tasks_enabled:
+        try:
+            from .tasks import runner as task_runner
+
+            worker_handle = task_runner.start()
+        except RuntimeError:
+            pass  # tasks_enabled=False 时 start() 会拒绝启动
+        except Exception:
+            logger.exception("任务 worker 启动失败（服务继续运行，仅无后台任务能力）")
     yield
+    if worker_handle is not None:
+        from .tasks import runner as task_runner
+
+        await task_runner.stop()
     get_pool().close()
 
 
@@ -98,6 +114,7 @@ app.include_router(workbench.router)
 app.include_router(advice.router)
 app.include_router(radar.router)
 app.include_router(discover.router)
+app.include_router(tasks_api.router)
 app.include_router(gap.router)
 
 # 静态界面必须挂载在所有路由之后：mount("/") 会匹配一切路径，

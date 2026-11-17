@@ -20,7 +20,8 @@
     .venv/Scripts/python.exe eval/run_scenarios.py --dry        # 只校验场景文件结构
     .venv/Scripts/python.exe eval/run_scenarios.py --filter mem-  # 只跑 id 含该串的
     .venv/Scripts/python.exe eval/run_scenarios.py --scenarios eval/scenarios_hard.jsonl
-    结果落 eval/results/scenarios_<时间戳>.json，供 eval/judge.py 二次评判。
+    .venv/Scripts/python.exe eval/run_scenarios.py --resume eval/results/scenarios_xxx.json  # 断点续跑
+    结果落 eval/results/scenarios_<时间戳>.json，每跑完一条即时落盘；支持 --resume 跳过已完成场景。
 """
 
 from __future__ import annotations
@@ -239,6 +240,8 @@ def run_case(client, conn, case: dict) -> dict:
                 "jobs": data.get("jobs") or [],
                 "steps": data.get("steps") or [],
                 "direction_hits": data.get("direction_hits"),
+                # 结构化 Trace 落盘（多路召回 ID 分离 + 截断标记 + 降级标记）
+                "trace": data.get("trace") or {},
             })
         problems = [error] if error else evaluate_expectations(conn, case, turns_out, snap["hist_max"])
     finally:
@@ -258,11 +261,34 @@ def run_case(client, conn, case: dict) -> dict:
     }
 
 
+def _save_scenario_report(out: Path, results: list[dict], elapsed_s: float) -> dict:
+    passed = sum(1 for r in results if r.get("ok"))
+    failed = len(results) - passed
+    report = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "total": len(results),
+        "passed": passed,
+        "failed": failed,
+        "elapsed_s": round(elapsed_s, 1),
+        "results": results,
+    }
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
+
+
+def _shown_path(p: Path) -> str:
+    try:
+        return str(p.relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="会话级端到端评测")
     parser.add_argument("--dry", action="store_true", help="只校验场景文件结构，不调模型不连库")
     parser.add_argument("--filter", default="", help="只跑 id 含该子串的场景")
     parser.add_argument("--scenarios", default=None, help="场景文件路径；缺省 eval/scenarios.jsonl")
+    parser.add_argument("--resume", default=None, help="从已有报告断点续跑，跳过其中已通过的场景")
     args = parser.parse_args()
 
     cases = load_scenarios(Path(args.scenarios) if args.scenarios else None)
@@ -288,39 +314,44 @@ def main() -> int:
     from app.main import app
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    results: list[dict] = []
+    done_map: dict[str, dict] = {}
+    if args.resume:
+        out = Path(args.resume).resolve()
+        prev = json.loads(out.read_text(encoding="utf-8"))
+        # 只跳过已通过的场景；失败或中断未录完的都在本次重跑
+        done_map = {r["id"]: r for r in (prev.get("results") or []) if r.get("ok")}
+    else:
+        out = RESULTS_DIR / f"scenarios_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    results_by_id: dict[str, dict] = dict(done_map)
     started = time.monotonic()
 
     with psycopg.connect(settings.database_url) as conn, TestClient(app) as client:
         for case in cases:
-            print(f"\n== {case['id']}：{case.get('desc', '')}")
+            cid = case["id"]
+            if cid in done_map:
+                print(f"\n== {cid}：已通过，续跑跳过")
+                continue
+            print(f"\n== {cid}：{case.get('desc', '')}")
             result = run_case(client, conn, case)
-            results.append(result)
-            global PASS, FAIL
+            results_by_id[cid] = result
             if result["ok"]:
-                PASS += 1
                 print(f"[PASS] ({result['elapsed_s']}s)")
             else:
-                FAIL += 1
                 for f in result["failures"]:
                     print(f"[FAIL] {f}")
             for t in result["turns"]:
                 shown = t["reply"][:60].replace("\n", " ")
                 print(f"    > {t['text']}  ⇒  {shown}{'…' if len(t['reply']) > 60 else ''}")
+            # 每跑完一条即时落盘（Checkpointing），中断不丢前面成果
+            ordered = [results_by_id[c["id"]] for c in cases if c["id"] in results_by_id]
+            _save_scenario_report(out, ordered, time.monotonic() - started)
 
-    report = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "total": len(results),
-        "passed": PASS,
-        "failed": FAIL,
-        "elapsed_s": round(time.monotonic() - started, 1),
-        "results": results,
-    }
-    out = RESULTS_DIR / f"scenarios_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    ordered = [results_by_id[c["id"]] for c in cases if c["id"] in results_by_id]
+    report = _save_scenario_report(out, ordered, time.monotonic() - started)
 
-    print(f"\n{PASS}/{len(results)} 通过，{report['elapsed_s']}s，报告已写入 {out.relative_to(ROOT)}")
-    return 0 if FAIL == 0 else 1
+    print(f"\n{report['passed']}/{len(ordered)} 通过，{report['elapsed_s']}s，报告已写入 {_shown_path(out)}")
+    return 0 if report["failed"] == 0 else 1
 
 
 if __name__ == "__main__":

@@ -68,11 +68,28 @@ async def run_round(trigger: str = "manual", notify=None) -> dict:
     失败形态：单来源失败记 failures 继续跑下一个；预算耗尽中途收尾；
     全部来源失败时 status=done 但 failures 说明原因——不抛异常，
     让调用方（SSE/对话）总能拿到一份"发生了什么"的完整交代。
+
+    双层互斥：进程内 asyncio.Lock（chat SSE 与队列 worker 同进程）+
+    Postgres advisory lock（P1.3 后独立 worker 进程与网页服务是两个进程，
+    模块级锁管不到它们——pg_try_advisory_lock 补上跨进程防双跑）。
+    advisory 连接整轮持有（1-2 分钟，池 max=4 可承受）。
     """
     if _round_lock.locked():
         raise RuntimeError("上一轮发现还在跑，等它结束再试")
     async with _round_lock:
-        return await _run_round_inner(trigger, notify)
+        with get_pool().connection() as lock_conn:
+            got = lock_conn.execute(
+                "SELECT pg_try_advisory_lock(hashtext('discover_run'))"
+            ).fetchone()[0]
+            if not got:
+                raise RuntimeError(
+                    "另一个进程正在跑主动发现（跨进程互斥），等它结束再试"
+                )
+            try:
+                return await _run_round_inner(trigger, notify)
+            finally:
+                lock_conn.execute("SELECT pg_advisory_unlock(hashtext('discover_run'))")
+                lock_conn.commit()
 
 
 async def _run_round_inner(trigger: str, notify) -> dict:

@@ -15,7 +15,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from ..config import settings
@@ -40,7 +40,7 @@ SUPPORTED_SUFFIXES = {".pdf", ".docx"}
 
 
 @router.post("/upload")
-async def upload_resume(file: UploadFile, background: BackgroundTasks) -> dict:
+async def upload_resume(file: UploadFile) -> dict:
     """接收 PDF，落盘后立即返回。同一份文件（按 SHA256）不会重复解析，避免重复烧钱。"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="缺少文件名")
@@ -76,7 +76,11 @@ async def upload_resume(file: UploadFile, background: BackgroundTasks) -> dict:
             # 上次失败或只解析了一部分，允许重试
             repo.set_resume_status(conn, resume_id, "pending", error=None)
             conn.commit()
-            background.add_task(_parse_resume, resume_id, Path(existing_path))
+            # P1.3：解析走 Postgres 队列（后台 worker 执行），不再用进程内
+            # BackgroundTasks —— 服务重启不会丢任务，可取消可观测
+            from ..tasks import queue as task_queue
+
+            task_queue.enqueue(conn, "parse_resume", {"resume_id": resume_id, "path": existing_path})
             return {"resume_id": resume_id, "status": "pending", "reused": True}
 
     final_path = settings.upload_dir / _file_name(file_hash, suffix)
@@ -93,7 +97,9 @@ async def upload_resume(file: UploadFile, background: BackgroundTasks) -> dict:
         )
         conn.commit()
 
-    background.add_task(_parse_resume, resume_id, final_path)
+    from ..tasks import queue as task_queue
+
+    task_queue.enqueue(conn, "parse_resume", {"resume_id": resume_id, "path": str(final_path)})
     return {"resume_id": resume_id, "status": "pending", "reused": False}
 
 
@@ -311,7 +317,7 @@ async def get_resume_file(resume_id: int) -> FileResponse:
 
 
 @router.post("/{resume_id}/reparse")
-async def reparse_resume(resume_id: int, background: BackgroundTasks) -> dict:
+async def reparse_resume(resume_id: int) -> dict:
     """按当前的 prompt 与模型版本重新解析。
 
     抽取 schema 变更（例如新增字段）后必须能重跑，否则旧画像是死数据。
@@ -325,7 +331,9 @@ async def reparse_resume(resume_id: int, background: BackgroundTasks) -> dict:
         repo.set_resume_status(conn, resume_id, "pending", error=None)
         conn.commit()
 
-    background.add_task(_parse_resume, resume_id, Path(file_path))
+    from ..tasks import queue as task_queue
+
+    task_queue.enqueue(conn, "parse_resume", {"resume_id": resume_id, "path": file_path})
     return {"resume_id": resume_id, "status": "pending"}
 
 

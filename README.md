@@ -709,6 +709,31 @@ Claude Desktop 在配置文件 `mcpServers` 里加同款 `command/args`。注册
 
 ---
 
+## 异步任务层：Postgres 队列 + 后台 worker
+
+三个真实慢任务的后台化：**简历解析**（扫描件 OCR 1–2 分钟）、**主动发现**（官网抓取一轮）、**批量匹配重建**（force 全量重算）。之前全靠进程内阻塞或 FastAPI BackgroundTasks——服务重启就丢、看不到进度、不能取消。
+
+```mermaid
+flowchart LR
+    up["上传简历 / 重解析"] -->|enqueue| q[("task_queue")]
+    ui["发现页任务面板"] -->|手动入队 / 取消| q
+    sched["worker 定时检查<br/>TASKS_SCHEDULED_DISCOVER_H"] -->|到点入队| q
+    q -->|FOR UPDATE SKIP LOCKED<br/>领取不重复| w["后台 worker<br/>（lifespan 内 asyncio）"]
+    w --> h1["parse_resume<br/>OCR + 抽取 + 质量重试"]
+    w --> h2["discover_run<br/>官网抓取一轮"]
+    w --> h3["match_rebuild<br/>force 全量重算"]
+```
+
+三条工程取舍：
+
+1. **Postgres 队列，不是 MQ**。领取用 `FOR UPDATE SKIP LOCKED`——两个 worker 并发领取拿到不同任务（有回归断言），未来要横向扩容直接起第二个 `python scripts/worker.py` 就行，不需要换消息中间件。单机单用户下 Kafka 的分区与吞吐没有对象。
+2. **崩溃恢复**。worker 启动时把遗留的 `running` 行重排 `pending`（15 分钟阈值）——上个进程没跑完的解析不会凭空消失，`resume.parse_status` 轮询照常收敛。
+3. **取消是协作式的**。pending 直接改状态；running 不硬杀协程，而是 worker 在每个进度检查点自查 `cancelled`（发现一轮 1-2 分钟内多个检查点，秒级响应）。队列 handler 抛 `TaskCancelled` 由 runner 落终态。
+
+跨进程双跑防护：主动发现同时受进程内 `asyncio.Lock`（chat SSE 与 worker 同进程）与 Postgres `pg_try_advisory_lock`（独立 worker 进程 vs 网页服务）双重互斥。
+
+---
+
 ## 投递之后：该催谁，以及分数到底准不准
 
 雷达管「投之前」，这一节管「投之后」。两件事，各回答一个此前没有答案的问题。
@@ -896,7 +921,7 @@ PDF 转 Word 的四个通病，都用渲染截图逐页比对修掉了：
 
 | 层 | 选型 | 为什么 |
 |---|---|---|
-| 服务 | FastAPI + uvicorn | 单机单用户，异步够用，无需队列 |
+| 服务 | FastAPI + uvicorn | 单机单用户，异步够用；慢任务走 Postgres 队列（`FOR UPDATE SKIP LOCKED`）+ 后台 worker，刻意不上 MQ |
 | 存储 | PostgreSQL 16 | JSONB 存槽位与字段、向量存 BYTEA、事务一致性 |
 | 向量 | bge-small-zh-v1.5（ONNX，512 维） | 本地 CPU 10ms/条，零成本、不出本机、可复现 |
 | 抽取 / 改写 | DeepSeek V4.1 Flash（1M 上下文） | 长 JD + 全量简历一次装得下 |
@@ -975,6 +1000,7 @@ backend/
     gap/          技术栈补漏（expand 技能展开+跨岗缓存 / assess 自评与
                   学习优先级聚合）
     mcp_server.py MCP server：8 个工具经 stdio 暴露给外部 agent（Claude 等）
+    tasks/        异步任务层（queue SKIP LOCKED 队列 / handlers 注册表 / runner worker 循环）
     memory/       记忆（extract 三层漏斗 / profile_repo 画像 / episode 情节召回）
     rewrite/      改写（docx_editor / pdf_convert / skills / factcheck /
                   ats_check 导出自检与页数裁剪建议）
@@ -1009,6 +1035,9 @@ python scripts/check_episode_recall.py   # 情节召回打分（离线：不需�
 python scripts/check_discover.py         # 主动发现：Moka 契约 / 锚点预筛 / 急招启发式 / 编排（离线 + 可选真库）
 python scripts/check_gap.py              # 技术栈补漏：展开缓存 / 自评幂等 / 聚合排序（离线 + 可选真库）
 python scripts/check_mcp.py              # MCP 协议回归：握手 / 8 工具 / 真实调用 / 404 语义（协议段离线可跑）
+python scripts/check_failover.py         # Failover 故障注入：全断网降级 / Trace 截断标记 / 空意图拦截（全离线）
+python scripts/check_eval_harness.py     # Eval Harness：judge 并发限流 / 独立裁判透传 / 断点续跑（全离线）
+python scripts/check_tasks.py            # 异步任务层：队列语义 / 取消 / 重试 / stale 恢复 / 并发 claim（需库）
 
 # 会话级端到端评测（需要数据库 + LLM key；通过 TestClient 进程内跑，不用起服务）
 python eval/run_scenarios.py             # 8 条多轮场景：记忆写入 / 路由出口 / 回复约束
@@ -1017,7 +1046,7 @@ python eval/run_scenarios.py --scenarios eval/scenarios_hard.jsonl   # 10 条对
 python eval/run_scenarios.py --dry       # 只校验场景文件结构，不调模型
 python eval/run_eval.py --cases eval/cases_hard.jsonl    # 19 条规则边界用例（含技能命中 50% 边界、统招三态、一票多否决）
 python eval/run_concurrency.py           # 并发竞态：多会话并发写画像 / 同 URL 并发入库去重（起真实 uvicorn 子进程）
-python eval/judge.py                     # 对最近一份场景报告做 LLM-as-judge（四维：编造/语气/贴题/缺口）
+python eval/judge.py --concurrency 3     # LLM-as-judge（Semaphore 限流 + 防偏见 + 可配独立 JUDGE_MODEL + --resume 续评）
 python eval/judge.py --compare eval/results/judged_旧.json   # 与上次对比维度通过率
 
 node scripts/check_extension.js      # 扩展顶层求值 + 结构

@@ -111,15 +111,21 @@ def _job_doc(job: dict) -> str:
     return " ".join(p for p in parts if p)
 
 
-async def _semantic_alignment(profile: dict, jobs: list[dict]) -> dict:
-    """语义判定：向量召回候选对，模型逐对裁定。失败降级为纯规则。"""
+async def _semantic_alignment_with_status(profile: dict, jobs: list[dict]) -> tuple[dict, bool]:
+    """语义判定：向量召回候选对，模型逐对裁定。返回 (结果, 是否异常降级)。"""
     if not settings.enable_semantic:
-        return {}
+        return {}, False
     try:
-        return await align_skills(profile, jobs)
+        return await align_skills(profile, jobs), False
     except Exception as exc:  # noqa: BLE001
         logger.warning("语义判定失败，本次仅用规则匹配：%s", exc)
-        return {}
+        return {}, True
+
+
+async def _semantic_alignment(profile: dict, jobs: list[dict]) -> dict:
+    """旧签名保留。"""
+    res, _ = await _semantic_alignment_with_status(profile, jobs)
+    return res
 
 
 def _pick_resume(profiles: dict[int, dict], intent: str, default_id: int | None = None) -> tuple[int | None, dict]:
@@ -239,10 +245,19 @@ def _recall_candidates(
         )[:RECALL_MAX]
     keep_set = set(keep)
     selected = [j for j in by_sim if int(j["job_id"]) in keep_set]
+    selected_ids = [int(j["job_id"]) for j in selected]
+    # 截断显式标记：如果候选被 RECALL_MAX 裁掉，或者字面/向量各自命中有落选，
+    # 评测报告必须看到这一事实，不能让裁判误以为"库里本来就没召回"
+    union_count = len(dict.fromkeys([*lexical_ids, *vector_ids]))
     return selected, {
         "total": len(jobs),
         "lexical": len(lexical_ids),
         "vector": len(vector_ids),
+        "lexical_ids": lexical_ids,
+        "vector_ids": vector_ids,
+        "selected_ids": selected_ids,
+        "truncated": union_count > len(selected),
+        "union_count": union_count,
         "terms": terms[:5],
         # 片段也带出去：判断"这个岗位在不在方向上"要用它，
         # 用整串会把「产品实习生」判成"不在产品方向"
@@ -379,6 +394,9 @@ async def handle_message(
     except Exception as exc:  # noqa: BLE001
         logger.warning("意图规划失败：%s", exc)
         plan_data = {}
+        plan_failed = True
+    else:
+        plan_failed = False
 
     intent = plan_data.get("intent") or slots.get("intent")
     cities = plan_data.get("cities") or slots.get("cities") or []
@@ -437,6 +455,11 @@ async def handle_message(
     # 走 chat / clarify 出口的消息不经过检索分支，也要能返回：
     # 前端和调用方统一读这两个字段，缺了就是另一种 500（收尾处无条件 update）
     direction_payload = {"direction_hits": None, "intent": ""}
+    # 结构化 Trace：供评测落盘定位（多路召回 ID 分离 + 截断标记 + 降级标记），不影响前端展示
+    trace_payload: dict = {
+        "route": "unknown",
+        "degraded": ["plan_fallback"] if plan_failed else [],
+    }
     updates = extract.clean_updates(plan_data.get("profile_updates") or [])
     if updates and _is_search_command(user_text):
         kept = [u for u in updates if u.get("key") not in SEARCH_ONLY_KEYS]
@@ -494,15 +517,19 @@ async def handle_message(
                 for j in summary.get("new_jobs", [])[:6]
             ]
             slots["last_discover_run"] = summary.get("run_id")
+        trace_payload["route"] = "discover"
     # ---- 不需要检索：闲聊/追问 ----
     elif chat_reply and not clarify:
         reply = chat_reply
         jobs_payload: list[dict] = []
+        trace_payload["route"] = "chat"
     # ---- 缺关键信息：先问再做，不猜 ----
     elif clarify:
         reply = clarify
         jobs_payload = []
+        trace_payload["route"] = "clarify"
     else:
+        trace_payload["route"] = "search"
         # ---- 执行检索管道 ----
         with get_pool().connection() as conn:
             profiles = {
@@ -548,10 +575,14 @@ async def handle_message(
 
             # ---- 第二段：判定（能不能投），只在候选内做 ----
             await step("语义判定：向量召回 + 模型逐对裁定…")
-            semantic = await _semantic_alignment(profile, candidate_jobs)
+            semantic, semantic_degraded = await _semantic_alignment_with_status(profile, candidate_jobs)
+            if semantic_degraded:
+                trace_payload["degraded"].append("semantic_judge_fallback")
             await step("匹配打分（学历/城市/性质/技能）…")
             results = rank(profile, candidate_jobs, prefs, semantic)
             sims = _semantic_order(intent or "", queries, candidate_jobs)
+            if not sims and candidate_jobs:
+                trace_payload["degraded"].append("vector_unavailable")
 
             passed = [r for r in results if r.decision is not Decision.REJECT]
             await step(f"{len(passed)} 个方向内的岗位能投")
@@ -627,7 +658,7 @@ async def handle_message(
                 if j.get("url")
             }
             await step("整理结果、生成回复…")
-            reply = await _compose(
+            reply, reply_degraded = await _compose_with_status(
                 user_text, intent or "", resume_id, top, blocked, sims, job_urls,
                 direction_hits=direction_hits,
                 profile_block=_profile_block(prof),
@@ -676,6 +707,21 @@ async def handle_message(
             # 排到前面，并给 fit 栏的岗位标「不是这个方向」—— 否则用户看到
             # 一排 Java 岗排在产品岗前面，会以为系统又没听懂
             direction_payload = {"direction_hits": direction_hits, "intent": intent or ""}
+            trace_payload["recall"] = {
+                "total": recall_meta.get("total", 0),
+                "lexical_ids": recall_meta.get("lexical_ids") or [],
+                "vector_ids": recall_meta.get("vector_ids") or [],
+                "selected_ids": recall_meta.get("selected_ids") or [],
+                "truncated": bool(recall_meta.get("truncated")),
+                "union_count": recall_meta.get("union_count", 0),
+                "terms": recall_meta.get("terms") or [],
+                "passed_count": len(passed),
+                "top_ids": [r.job_id for r in top],
+                "blocked_ids": [r.job_id for r in blocked],
+                "sims_top": {str(jid): sims.get(jid) for jid in [r.job_id for r in top] + [r.job_id for r in blocked] if jid in sims},
+            }
+            if reply_degraded:
+                trace_payload["degraded"].append("compose_template_fallback")
 
     # 写入结果必须说出来。用户被告知"记住了"而库里没变，
     # 比干脆不记更糟 —— 预期被建立起来，之后所有判断都建立在错的前提上。
@@ -702,6 +748,7 @@ async def handle_message(
         "jobs": jobs_payload,
         "slots": slots,
         "steps": steps,
+        "trace": trace_payload,
     }
     out.update(direction_payload)
     return out
@@ -738,7 +785,7 @@ def _all_profiles(conn) -> list[dict]:
     return out
 
 
-async def _compose(
+async def _compose_with_status(
     user_text: str,
     intent: str,
     resume_id: int,
@@ -750,16 +797,8 @@ async def _compose(
     recall_block: str = "",
     direction_hits: int | None = None,
     cities_by_id: dict[int, str | None] | None = None,
-) -> str:
-    """把检索结果写成回复。模型失败时退回模板，保证一定有回复。
-
-    profile_block / recall_block 由调用方传入，不在这里从头查 ——
-    它们是会话开场时算好的固定前缀，会话中不该再变（变了服务端缓存全失效）。
-
-    cities_by_id 必须传：REPLY 提示词要求按「岗位名（城市，分数）」格式输出，
-    结果行里却不给城市的话，模型只能编一个数据属性 —— 评测抓到过它对着
-    有城市的岗位说"城市信息缺失"。缺失就明写「城市未标注」，不让模型猜。
-    """
+) -> tuple[str, bool]:
+    """把检索结果写成回复，返回 (reply, 是否降级到模板)。"""
     lines: list[str] = []
     for r in top:
         url = (urls or {}).get(r.job_id)
@@ -772,26 +811,16 @@ async def _compose(
     summary = "\n".join(lines) if lines else "（这个方向上没有能投的岗位）"
 
     def _why(r) -> str:
-        """从规则结果里取"卡在哪"，而不是只给一句"硬约束不符"。
-
-        用户需要知道是"城市不符"还是"技能差 4 项" —— 前者改个设置就行，
-        后者要补能力。这两件事的处理方式完全不同。
-        """
         reasons = [c.detail for c in r.checks if c.decision.value == "reject"]
         return "；".join(reasons[:2]) or "硬约束不符"
 
     def _gap(r) -> str:
-        """缺什么技能。回复里"补什么"建议的原料 —— 没有它，模型只能说"不匹配"，
-        说不出"补了哪几项就能投"，而后者才是用户要的行动指令。"""
         return "、".join(r.missed_skills[:4]) if r.missed_skills else ""
 
     near = "\n".join(
         f"- {r.title}：{_why(r)}" + (f" → 缺的技能：{_gap(r)}" if _gap(r) else "")
         for r in blocked
     )
-    # 方向全不匹配时，输出结构完全不同：主角是"差什么、补什么"，
-    # 方向外岗位降级为一句附注 —— 用户问产品，递一排 Java 还配上推荐语气，
-    # 等于告诉他"你想要的没有，随便看看别的吧"
     if direction_hits == 0 and blocked:
         structure_note = (
             "输出结构（严格遵守）：\n"
@@ -822,13 +851,20 @@ async def _compose(
         if isinstance(text, dict):
             for key in ("reply", "content", "text", "answer"):
                 if isinstance(text.get(key), str) and text[key].strip():
-                    return text[key]
-            return ""
-        return str(text)
+                    return text[key], False
+            return "", False
+        return str(text), False
     except Exception as exc:  # noqa: BLE001
         logger.warning("回复生成失败，退回模板：%s", exc)
         head = f"围绕「{intent}」找到 {len(top)} 个通过硬约束的岗位：\n" if intent else ""
-        return head + summary + (f"\n\n语义相近但不满足硬约束：\n{near}" if near else "")
+        note = "（模型暂时不可用，以下为纯规则/模板降级结果）\n"
+        return note + head + summary + (f"\n\n语义相近但不满足硬约束：\n{near}" if near else ""), True
+
+
+async def _compose(*args, **kwargs) -> str:
+    """旧签名保留，供外部单独调用时只拿文本。"""
+    reply, _ = await _compose_with_status(*args, **kwargs)
+    return reply
 
 
 def _as_bool(value, default: bool) -> bool:

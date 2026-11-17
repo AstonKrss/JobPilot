@@ -110,6 +110,7 @@ function enterRadar() {
   loadRadarPlan();
   loadAfterPanel();
   loadDiscover();
+  loadTasks();
 }
 
 document.querySelectorAll('.tab').forEach((tab) => {
@@ -2502,6 +2503,73 @@ function renderDiscoverRuns(runs) {
       </div>
     </div>`).join('');
 }
+
+/* ---------- 后台任务（P1.3：Postgres 队列 + worker） ----------
+   简历解析 / 主动发现 / 匹配重建都在这里可见、可取消。
+   轮询只在面板打开时进行（3 秒），关掉面板就停，不空转。 */
+let tasksPollTimer = null;
+
+const TASK_STATUS_META = {
+  pending: ['', '排队中'], running: ['ok', '执行中'], done: ['', '完成'],
+  failed: ['bad', '失败'], cancelled: ['', '已取消'],
+};
+const TASK_TYPE_LABEL = {
+  parse_resume: '简历解析', discover_run: '主动发现', match_rebuild: '匹配重建',
+};
+
+async function loadTasks() {
+  try {
+    const d = await api('/api/tasks?limit=15');
+    renderTasks(d.items || []);
+    document.getElementById('tasks-status').textContent =
+      `执行中 ${d.running} · 排队 ${d.pending}`;
+    const viewActive = document.querySelector('.view.active')?.id === 'view-radar';
+    if (!viewActive) return;  // 离开发现页就停止轮询，不后台空转
+    clearTimeout(tasksPollTimer);
+    tasksPollTimer = setTimeout(loadTasks, 3000);
+  } catch (e) {
+    document.getElementById('tasks-list').innerHTML = `<div class="empty">${esc(e.message || '加载失败')}</div>`;
+  }
+}
+
+function renderTasks(items) {
+  const box = document.getElementById('tasks-list');
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">还没有后台任务。上传简历或点「现在搜一轮」后，这里能看到执行进度。</div>';
+    return;
+  }
+  box.innerHTML = items.map((t) => {
+    const meta = TASK_STATUS_META[t.status] || ['', t.status];
+    const canCancel = t.status === 'pending' || t.status === 'running';
+    const when = (t.created_at || '').slice(5, 16);
+    return `
+    <div class="item">
+      <div class="item-head">
+        <strong>${esc(TASK_TYPE_LABEL[t.type] || t.type)} #${t.id}</strong>
+        <span class="badge ${meta[0]}">${meta[1]}${t.attempts > 1 ? ` · 第 ${t.attempts} 次尝试` : ''}</span>
+        ${canCancel ? `<button class="small" data-task-cancel="${t.id}" style="margin-left:auto">取消</button>` : ''}
+      </div>
+      ${t.progress ? `<div class="item-meta">${esc(t.progress)}</div>` : ''}
+      ${t.error ? `<div class="item-meta missed">${esc(t.error)}</div>` : ''}
+      <div class="item-meta">${esc(when)}</div>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('[data-task-cancel]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await withLoading(btn, '…', async () => {
+        const r = await api(`/api/tasks/${btn.dataset.taskCancel}/cancel`, { method: 'POST' });
+        toast(r.ok ? '已取消' : (r.reason || '无法取消'));
+        loadTasks();
+      });
+    });
+  });
+}
+
+document.getElementById('btn-tasks-refresh')?.addEventListener('click', loadTasks);
+document.querySelector('#tasks-panel details')?.addEventListener('toggle', (ev) => {
+  clearTimeout(tasksPollTimer);
+  if (ev.currentTarget.open) loadTasks();
+});
 
 document.getElementById('discover-add-btn')?.addEventListener('click', async () => {
   const name = document.getElementById('discover-add-name').value.trim();
